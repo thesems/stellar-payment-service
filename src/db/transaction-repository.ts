@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, or } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { type NewTransaction, type Transaction, transactions } from "./schema.js";
@@ -64,6 +64,34 @@ export async function findSubmittedTransactions(): Promise<Transaction[]> {
             isNotNull(transactions.txHash),
         ))
         .orderBy(asc(transactions.submittedAt));
+}
+
+export async function listTransactions(input: {
+    account: string | undefined;
+    limit: number;
+    offset: number;
+}): Promise<Transaction[]> {
+    const conditions = [];
+
+    if (input.account) {
+        conditions.push(or(
+            eq(transactions.sourceAccount, input.account),
+            eq(transactions.destinationAccount, input.account),
+        ));
+    }
+
+    const query = db
+        .select()
+        .from(transactions)
+        .orderBy(desc(transactions.createdAt))
+        .limit(input.limit)
+        .offset(input.offset);
+
+    if (conditions.length > 0) {
+        return query.where(and(...conditions));
+    }
+
+    return query;
 }
 
 export async function markTransactionSubmitted(

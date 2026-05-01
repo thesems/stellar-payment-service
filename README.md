@@ -6,6 +6,8 @@ The project demonstrates practical Stellar backend integration: transaction cons
 
 This is a testnet learning project. It accepts source secret keys directly for local experimentation; a production system should use a proper custody/signing model or a non-custodial wallet signing flow.
 
+It also serves a small browser UI from the same Fastify process. The frontend is kept in [`web/`](./web) and is available at the service root.
+
 ## Implemented
 
 - Native XLM payment submission on Stellar testnet.
@@ -64,6 +66,17 @@ Fetches account sequence and balances through Horizon.
 
 Basic health check.
 
+## Web UI
+
+The service root serves a small static frontend that exercises the three main endpoints:
+
+- `GET /health`
+- `GET /account/:address`
+- `POST /tx/payment`
+- `GET /tx/:id`
+
+Open the service root in a browser after starting the API and use the UI to test requests locally without CORS or a second server.
+
 ## Testnet Demo
 
 Generate a disposable testnet keypair:
@@ -103,6 +116,30 @@ npm run worker:tx    # polling worker
 npm run lint         # type-check
 npm run test:run     # tests
 npm run db:migrate   # apply migrations
+```
+
+## Logging
+
+Set `LOG_PRETTY=false` to switch back to JSON logs. The default is pretty, human-readable output for local development.
+
+## Protocol 26 SAC Account Activation Test
+
+This script tests whether the native XLM Stellar Asset Contract can activate a fresh `G...` account by transferring XLM to it.
+
+```bash
+SOURCE_SECRET=S_SOURCE_SECRET npm run test:sac-create-account
+```
+
+By default, it generates a fresh destination public key, transfers `1.0000000` XLM through the native XLM SAC on testnet, polls the transaction, and checks whether the destination account exists afterward.
+
+Optional environment variables:
+
+```bash
+DESTINATION_PUBLIC_KEY=G_DESTINATION # use a specific unfunded destination
+AMOUNT_XLM=1.0000000                 # transfer amount, max 7 decimal places
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
+STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 ```
 
 ## Scope

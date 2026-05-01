@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transaction } from "../db/schema.js";
 
 const createPaymentTransaction = vi.fn();
+const listTransactions = vi.fn();
 const markTransactionSubmitted = vi.fn();
 const markTransactionFailed = vi.fn();
 const publicKeyFromSecret = vi.fn();
@@ -14,10 +15,11 @@ vi.mock("../services/transaction-service.js", () => ({
 }));
 
 vi.mock("../db/transaction-repository.js", () => ({
-  findTransactionByHash: vi.fn(),
-  findTransactionById: vi.fn(),
-  markTransactionFailed,
-  markTransactionSubmitted,
+    findTransactionByHash: vi.fn(),
+    findTransactionById: vi.fn(),
+    listTransactions,
+    markTransactionFailed,
+    markTransactionSubmitted,
 }));
 
 vi.mock("../services/stellar.js", () => ({
@@ -126,6 +128,76 @@ describe("POST /tx/payment", () => {
   });
 });
 
+describe("GET /tx", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("lists transactions with pagination and optional account filtering", async () => {
+    const firstTransaction = makeTransaction({
+      id: "11111111-1111-1111-1111-111111111111",
+      sourceAccount: stellarKey("A"),
+      destinationAccount: stellarKey("B"),
+      createdAt: new Date("2026-04-18T10:05:00.000Z"),
+      updatedAt: new Date("2026-04-18T10:05:00.000Z"),
+    });
+    const secondTransaction = makeTransaction({
+      id: "22222222-2222-2222-2222-222222222222",
+      sourceAccount: stellarKey("C"),
+      destinationAccount: stellarKey("A"),
+      createdAt: new Date("2026-04-18T10:04:00.000Z"),
+      updatedAt: new Date("2026-04-18T10:04:00.000Z"),
+    });
+
+    listTransactions.mockResolvedValue([firstTransaction, secondTransaction]);
+
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "GET",
+      url: `/tx?account=${stellarKey("A")}&limit=2&offset=4`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(listTransactions).toHaveBeenCalledWith({
+      account: stellarKey("A"),
+      limit: 2,
+      offset: 4,
+    });
+    expect(response.json()).toMatchObject({
+      transactions: [
+        {
+          id: firstTransaction.id,
+          source_account: stellarKey("A"),
+          destination_account: stellarKey("B"),
+        },
+        {
+          id: secondTransaction.id,
+          source_account: stellarKey("C"),
+          destination_account: stellarKey("A"),
+        },
+      ],
+    });
+
+    await app.close();
+  });
+
+  it("rejects invalid pagination parameters", async () => {
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/tx?limit=0&offset=-1",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: "validation_error",
+    });
+    expect(listTransactions).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+});
+
 async function buildTestApp() {
   const app = Fastify();
   await app.register(transactionRoutes);
@@ -141,6 +213,10 @@ function paymentPayload() {
     asset: { type: "native" },
     memo: "demo",
   };
+}
+
+function stellarKey(char: string) {
+  return `G${char.repeat(55)}`;
 }
 
 function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {

@@ -1,0 +1,357 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a1018;
+  --bg-2: #111b27;
+  --panel: rgba(16, 24, 34, 0.96);
+  --panel-border: rgba(166, 188, 214, 0.16);
+  --text: #eef3f8;
+  --muted: #9aa9b8;
+  --accent: #8dc4d4;
+  --shadow: 0 14px 32px rgba(0, 0, 0, 0.24);
+  --radius: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 24%),
+    linear-gradient(160deg, var(--bg), var(--bg-2));
+  padding: 20px 16px 32px;
+}
+
+.shell {
+  position: relative;
+  z-index: 1;
+  max-width: 1140px;
+  margin: 0 auto;
+}
+
+.hero {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: rgba(16, 24, 34, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.eyebrow,
+.card-kicker {
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  color: var(--accent);
+  font-size: 0.7rem;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-weight: 650;
+}
+
+h1 {
+  font-size: 1.08rem;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.lede,
+.card-copy,
+.hint {
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--muted);
+}
+
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgba(7, 16, 24, 0.24);
+}
+
+.hero-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.lede {
+  max-width: 72ch;
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+}
+
+.status-pill {
+  min-width: 120px;
+  justify-content: center;
+}
+
+.status-pill.status-checking {
+  color: #d4e0ea;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(166, 188, 214, 0.24);
+}
+
+.status-pill.status-ok {
+  color: #b7f7c8;
+  background: rgba(62, 142, 88, 0.18);
+  border-color: rgba(98, 184, 120, 0.45);
+}
+
+.status-pill.status-error {
+  color: #ffb9b9;
+  background: rgba(154, 59, 59, 0.2);
+  border-color: rgba(211, 108, 108, 0.45);
+}
+
+.button {
+  appearance: none;
+  border: 1px solid rgba(141, 196, 212, 0.32);
+  background: linear-gradient(180deg, rgba(141, 196, 212, 0.98), rgba(105, 162, 184, 0.98));
+  color: #061019;
+  border-radius: 12px;
+  padding: 9px 12px;
+  font: 650 0.84rem Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+  box-shadow: 0 8px 18px rgba(7, 16, 24, 0.18);
+}
+
+.button:hover {
+  transform: translateY(-1px);
+}
+
+.button:active {
+  transform: translateY(0);
+  opacity: 0.95;
+}
+
+.button-secondary {
+  background: transparent;
+  color: var(--text);
+  box-shadow: none;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.tabs-nested {
+  margin: 0 0 14px;
+}
+
+.tab-button {
+  appearance: none;
+  border: 1px solid var(--panel-border);
+  background: rgba(16, 24, 34, 0.54);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font: 650 0.8rem Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.tab-button.is-active {
+  color: var(--text);
+  border-color: rgba(141, 196, 212, 0.45);
+  background: rgba(141, 196, 212, 0.14);
+}
+
+.tab-panel[hidden] {
+  display: none;
+}
+
+.card {
+  grid-column: span 4;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow);
+}
+
+.card-wide {
+  grid-column: span 12;
+}
+
+.tx-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+.tx-grid .card {
+  grid-column: span 6;
+}
+
+.tx-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.card h2 {
+  font-size: 1.05rem;
+}
+
+.card h3 {
+  font-size: 0.92rem;
+  margin-bottom: 6px;
+}
+
+.card-copy {
+  margin: 6px 0 12px;
+  line-height: 1.5;
+  font-size: 0.84rem;
+}
+
+.form {
+  display: grid;
+  gap: 12px;
+}
+
+.form label {
+  display: grid;
+  gap: 8px;
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.form input {
+  width: 100%;
+  padding: 10px 11px;
+  border-radius: 12px;
+  border: 1px solid rgba(179, 208, 255, 0.15);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.form input:focus {
+  border-color: rgba(110, 211, 207, 0.6);
+  box-shadow: 0 0 0 3px rgba(110, 211, 207, 0.12);
+}
+
+.output {
+  margin: 12px 0 0;
+  min-height: 120px;
+  padding: 12px;
+  border-radius: 14px;
+  overflow: auto;
+  background: rgba(2, 8, 15, 0.62);
+  border: 1px solid rgba(179, 208, 255, 0.14);
+  color: #d7e5f8;
+  font: 0.8rem/1.45 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  white-space: pre-wrap;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .card {
+    grid-column: span 12;
+  }
+
+  .tx-grid .card {
+    grid-column: span 12;
+  }
+}
+
+@media (max-width: 640px) {
+  body {
+    padding: 12px 10px 20px;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  h1 {
+    font-size: 1rem;
+  }
+
+  .hero-top,
+  .hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .hero-top {
+    gap: 10px;
+  }
+
+  .brand-lockup {
+    align-items: flex-start;
+  }
+
+  .tabs {
+    margin-bottom: 10px;
+  }
+}

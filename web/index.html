@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stellar Payment Service</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div class="hero-top">
+          <div class="brand-lockup">
+            <img class="brand-mark" src="/favicon.svg" alt="" aria-hidden="true" />
+            <div>
+            <p class="eyebrow">stellar-payment-service</p>
+            <h1>Operations Console</h1>
+            </div>
+          </div>
+          <span class="pill status-pill status-checking" id="serviceStatus" aria-live="polite">Health: checking</span>
+        </div>
+        <div class="hero-actions">
+          <p class="lede">Use this panel to verify health, inspect accounts, and submit or trace transactions.</p>
+          <button class="button button-secondary" id="pingButton" type="button">Check health</button>
+        </div>
+      </header>
+
+      <nav class="tabs" role="tablist" aria-label="Workspace tabs">
+        <button class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="accountsPanel" data-tab-group="workspace" data-tab="accounts">
+          Accounts
+        </button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="transactionsPanel" data-tab-group="workspace" data-tab="transactions">
+          Transactions
+        </button>
+      </nav>
+
+      <section class="tab-panels">
+        <div class="tab-panel" id="accountsPanel" data-tab-group="workspace" data-tab-panel="accounts" role="tabpanel">
+          <div class="grid">
+            <article class="card">
+              <div class="card-head">
+                <div>
+                  <p class="card-kicker">Read</p>
+                  <h2>Account</h2>
+                </div>
+              </div>
+              <p class="card-copy">Fetch sequence and balances for a Stellar public key.</p>
+              <form id="accountForm" class="form">
+                <label>
+                  Public key
+                  <input name="address" placeholder="G..." autocomplete="off" required />
+                </label>
+                <button class="button" type="submit">GET /account/:address</button>
+              </form>
+              <pre class="output" id="accountOutput">No response yet.</pre>
+            </article>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="transactionsPanel" data-tab-group="workspace" data-tab-panel="transactions" role="tabpanel" hidden>
+          <section class="subtabs">
+            <nav class="tabs tabs-nested" role="tablist" aria-label="Transaction tabs">
+              <button class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="transactionsViewPanel" data-tab-group="transactions" data-tab="view">
+                View
+              </button>
+              <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="transactionsSubmitPanel" data-tab-group="transactions" data-tab="submit">
+                Submit
+              </button>
+            </nav>
+
+            <div class="tab-panels">
+              <div class="tab-panel" id="transactionsViewPanel" data-tab-group="transactions" data-tab-panel="view" role="tabpanel">
+                <section class="tx-grid">
+                  <article class="card">
+                    <div class="card-head">
+                      <div>
+                        <p class="card-kicker">Read</p>
+                        <h2>Transaction list</h2>
+                      </div>
+                    </div>
+                    <p class="card-copy">
+                      List all transactions, optionally filtered by account, with limit and offset pagination.
+                    </p>
+
+                    <form id="transactionListForm" class="form">
+                      <label>
+                        Account
+                        <input name="account" placeholder="optional G..." autocomplete="off" />
+                      </label>
+                      <label>
+                        Limit
+                        <input name="limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required />
+                      </label>
+                      <label>
+                        Offset
+                        <input name="offset" type="number" min="0" step="1" value="0" inputmode="numeric" required />
+                      </label>
+                      <button class="button" type="submit">GET /tx</button>
+                    </form>
+
+                    <pre class="output" id="transactionListOutput">No response yet.</pre>
+                  </article>
+
+                  <article class="card">
+                    <div class="card-head">
+                      <div>
+                        <p class="card-kicker">Look-up</p>
+                        <h2>Transaction</h2>
+                      </div>
+                    </div>
+                    <p class="card-copy">Fetch a transaction by UUID or Stellar hash.</p>
+
+                    <form id="transactionLookupForm" class="form">
+                      <label>
+                        Transaction ID or hash
+                        <input name="id" placeholder="UUID or 64-char hash" autocomplete="off" required />
+                      </label>
+                      <button class="button" type="submit">GET /tx/:id</button>
+                      <p class="hint">Use the ID or hash returned by the payment response.</p>
+                    </form>
+
+                    <pre class="output" id="transactionLookupOutput">No response yet.</pre>
+                  </article>
+                </section>
+              </div>
+
+              <div class="tab-panel" id="transactionsSubmitPanel" data-tab-group="transactions" data-tab-panel="submit" role="tabpanel" hidden>
+                <article class="card">
+                  <div class="card-head">
+                    <div>
+                      <p class="card-kicker">Write</p>
+                      <h2>Payment</h2>
+                    </div>
+                  </div>
+                  <p class="card-copy">
+                    Submit a native XLM payment.
+                  </p>
+
+                  <form id="paymentForm" class="form">
+                    <label>
+                      Idempotency key
+                      <input name="idempotency_key" placeholder="xlm-demo-001" required />
+                    </label>
+                    <label>
+                      Source secret
+                      <input name="source_secret" placeholder="S..." autocomplete="off" required />
+                    </label>
+                    <label>
+                      Destination
+                      <input name="destination" placeholder="G..." autocomplete="off" required />
+                    </label>
+                    <label>
+                      Amount
+                      <input name="amount" placeholder="1.0000000" inputmode="decimal" required />
+                    </label>
+                    <label>
+                      Memo
+                      <input name="memo" placeholder="optional memo" maxlength="28" />
+                    </label>
+                    <button class="button" type="submit">POST /tx/payment</button>
+                  </form>
+
+                  <pre class="output" id="paymentOutput">No response yet.</pre>
+                </article>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

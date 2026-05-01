@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
-import { findTransactionByHash, findTransactionById, markTransactionFailed, markTransactionSubmitted } from "../db/transaction-repository.js";
+import { findTransactionByHash, findTransactionById, listTransactions, markTransactionFailed, markTransactionSubmitted } from "../db/transaction-repository.js";
 import { parseHorizonError } from "../services/horizon-error-parser.js";
 import { publicKeyFromSecret, submitNativePayment } from "../services/stellar.js";
 
@@ -28,8 +28,33 @@ const createPaymentSchema = z.object({
 
 const uuidSchema = z.string().uuid();
 const txHashSchema = z.string().regex(/^[a-fA-F0-9]{64}$/, "tx hash must be 64 hex characters");
+const listTransactionsQuerySchema = z.object({
+    account: z.string().trim().regex(/^G[A-Z2-7]{55}$/, "account must be a Stellar public key").optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    offset: z.coerce.number().int().min(0).default(0),
+});
 
 export async function transactionRoutes(app: FastifyInstance): Promise<void> {
+    app.get("/tx", async (request, reply) => {
+        const query = listTransactionsQuerySchema.safeParse(request.query);
+        if (!query.success) {
+            return reply.status(400).send({
+                error: "validation_error",
+                details: query.error.flatten().fieldErrors,
+            });
+        }
+
+        const transactions = await listTransactions({
+            account: query.data.account,
+            limit: query.data.limit,
+            offset: query.data.offset,
+        });
+
+        return reply.send({
+            transactions: transactions.map(serializeTransaction),
+        });
+    });
+
     app.get("/tx/:id", async (request, reply) => {
         const params = z.object({ id: z.string().trim().min(1) }).safeParse(request.params);
         if (!params.success) {
