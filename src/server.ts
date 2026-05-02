@@ -14,7 +14,7 @@ const app = Fastify({ loggerInstance: createLogger(config.logPretty) });
 let shuttingDown = false;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const webRoot = path.resolve(__dirname, "../web");
+const webRoot = path.resolve(__dirname, "../web/dist");
 
 async function main(): Promise<void> {
   try {

@@ -2,6 +2,7 @@ import { jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-co
 
 export const transactionStatus = pgEnum("transaction_status", [
   "created",
+  "submitting",
   "submitted",
   "confirmed",
   "failed",

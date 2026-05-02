@@ -3,6 +3,27 @@ import { and, asc, desc, eq, isNotNull, or } from "drizzle-orm";
 import { db } from "./client.js";
 import { type NewTransaction, type Transaction, transactions } from "./schema.js";
 
+type TransactionLookupField = "id" | "idempotencyKey" | "txHash";
+
+async function findTransactionByField(
+    field: TransactionLookupField,
+    value: string,
+): Promise<Transaction | undefined> {
+    const column = field === "id"
+        ? transactions.id
+        : field === "idempotencyKey"
+            ? transactions.idempotencyKey
+            : transactions.txHash;
+
+    const rows = await db
+        .select()
+        .from(transactions)
+        .where(eq(column, value))
+        .limit(1);
+
+    return rows[0];
+}
+
 export async function createTransactionIfNew(
     input: NewTransaction,
 ): Promise<{ transaction: Transaction; idempotentReplay: boolean }> {
@@ -26,31 +47,31 @@ export async function createTransactionIfNew(
 export async function findTransactionByIdempotencyKey(
     idempotencyKey: string,
 ): Promise<Transaction | undefined> {
-    const rows = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.idempotencyKey, idempotencyKey))
-        .limit(1);
-
-    return rows[0];
+    return findTransactionByField("idempotencyKey", idempotencyKey);
 }
 
 export async function findTransactionById(id: string): Promise<Transaction | undefined> {
-    const rows = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.id, id))
-        .limit(1);
-
-    return rows[0];
+    return findTransactionByField("id", id);
 }
 
 export async function findTransactionByHash(txHash: string): Promise<Transaction | undefined> {
+    return findTransactionByField("txHash", txHash);
+}
+
+export async function claimTransactionForSubmission(
+    idempotencyKey: string,
+): Promise<Transaction | undefined> {
     const rows = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.txHash, txHash))
-        .limit(1);
+        .update(transactions)
+        .set({
+            status: "submitting",
+            updatedAt: new Date(),
+        })
+        .where(and(
+            eq(transactions.idempotencyKey, idempotencyKey),
+            eq(transactions.status, "created"),
+        ))
+        .returning();
 
     return rows[0];
 }
@@ -123,6 +144,33 @@ export async function markTransactionSubmitted(
     return transaction;
 }
 
+export async function markSubmittingTransactionSubmitted(
+    id: string,
+    input: {
+        txHash: string;
+        envelopeXdr: string;
+        resultXdr: string;
+    },
+): Promise<Transaction | undefined> {
+    const rows = await db
+        .update(transactions)
+        .set({
+            status: "submitted",
+            txHash: input.txHash,
+            envelopeXdr: input.envelopeXdr,
+            resultXdr: input.resultXdr,
+            submittedAt: new Date(),
+            updatedAt: new Date(),
+        })
+        .where(and(
+            eq(transactions.id, id),
+            eq(transactions.status, "submitting"),
+        ))
+        .returning();
+
+    return rows[0];
+}
+
 export async function markTransactionFailed(
     id: string,
     input: {
@@ -189,7 +237,10 @@ export async function markSubmittedTransactionFailed(
         })
         .where(and(
             eq(transactions.id, id),
-            eq(transactions.status, "submitted"),
+            or(
+                eq(transactions.status, "submitted"),
+                eq(transactions.status, "submitting"),
+            ),
         ))
         .returning();
 

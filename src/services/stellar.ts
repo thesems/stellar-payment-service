@@ -1,13 +1,23 @@
-import { Asset, BASE_FEE, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Asset, BASE_FEE, FeeBumpTransaction, Horizon, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import type { Transaction as StellarTransaction } from "@stellar/stellar-sdk";
 
 import { config } from "../config/env.js";
 
-type InputNativePayment = {
-    sourceSecret: string;
+type PrepareNativePaymentInput = {
+    sourceAccount: string;
     destination: string;
     amount: string;
     memo?: string | undefined;
 }
+
+export type ParsedSignedNativePayment = {
+    transaction: StellarTransaction;
+    hash: string;
+    sourceAccount: string;
+    destination: string;
+    amount: string;
+    memo?: string | undefined;
+};
 
 type SubmittedStellarTransaction = {
     sourceAccount: string;
@@ -16,12 +26,9 @@ type SubmittedStellarTransaction = {
     envelopeXdr: string;
 };
 
-export async function submitNativePayment(input: InputNativePayment): Promise<SubmittedStellarTransaction> {
-    const keypair = Keypair.fromSecret(input.sourceSecret);
-    const publicKey = keypair.publicKey();
-
+export async function prepareNativePayment(input: PrepareNativePaymentInput): Promise<string> {
     const server = new Horizon.Server(config.stellarHorizonUrl);
-    const account = await server.loadAccount(publicKey);
+    const account = await server.loadAccount(input.sourceAccount);
 
     const builder = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -37,19 +44,59 @@ export async function submitNativePayment(input: InputNativePayment): Promise<Su
         builder.addMemo(Memo.text(input.memo));
     }
 
-    const tx = builder.setTimeout(300).build();
-    tx.sign(keypair);
-    const resp = await server.submitTransaction(tx);
+    return builder.setTimeout(300).build().toEnvelope().toXDR("base64");
+}
+
+export function parseSignedNativePayment(signedTransaction: string): ParsedSignedNativePayment {
+    const transaction = TransactionBuilder.fromXDR(signedTransaction, config.stellarNetworkPassphrase);
+    if (transaction instanceof FeeBumpTransaction) {
+        throw new Error("Only signed native payment transactions are supported.");
+    }
+
+    if (transaction.signatures.length === 0) {
+        throw new Error("Signed transaction must include at least one signature.");
+    }
+
+    if (transaction.operations.length !== 1) {
+        throw new Error("Only single-operation native payment transactions are supported.");
+    }
+
+    const operation = transaction.operations[0];
+    if (!operation) {
+        throw new Error("Only single-operation native payment transactions are supported.");
+    }
+
+    if (operation.type !== "payment") {
+        throw new Error("Only native payment transactions are supported.");
+    }
+
+    if (!operation.asset.isNative()) {
+        throw new Error("Only native payment transactions are supported.");
+    }
+
+    const memo = transaction.memo.type === "text"
+        ? String(transaction.memo.value)
+        : undefined;
+
     return {
-        sourceAccount: publicKey,
+        transaction,
+        hash: transaction.hash().toString("hex"),
+        sourceAccount: transaction.source,
+        destination: operation.destination,
+        amount: operation.amount,
+        memo,
+    };
+}
+
+export async function submitSignedNativePayment(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
+    const server = new Horizon.Server(config.stellarHorizonUrl);
+    const resp = await server.submitTransaction(transaction);
+    return {
+        sourceAccount: transaction.source,
         hash: resp.hash,
         resultXdr: resp.result_xdr,
         envelopeXdr: resp.envelope_xdr,
     }
-}
-
-export function publicKeyFromSecret(sourceSecret: string): string {
-    return Keypair.fromSecret(sourceSecret).publicKey();
 }
 
 export async function getAccount(publicKey: string): Promise<Horizon.AccountResponse> {

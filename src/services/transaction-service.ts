@@ -16,6 +16,7 @@ export type CreatePaymentInput = {
   amount: string;
   asset: PaymentAsset;
   memo?: string | undefined;
+  txHash?: string | undefined;
 };
 
 export async function createPaymentTransaction(
@@ -31,5 +32,6 @@ export async function createPaymentTransaction(
     assetIssuer: input.asset.type === "native" ? null : input.asset.issuer,
     amount: input.amount,
     memo: input.memo ?? null,
+    txHash: input.txHash ?? null,
   });
 }

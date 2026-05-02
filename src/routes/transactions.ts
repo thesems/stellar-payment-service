@@ -3,9 +3,10 @@ import { z } from "zod";
 
 import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
-import { findTransactionByHash, findTransactionById, listTransactions, markTransactionFailed, markTransactionSubmitted } from "../db/transaction-repository.js";
+import { claimTransactionForSubmission, findTransactionByHash, findTransactionById, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
 import { parseHorizonError } from "../services/horizon-error-parser.js";
-import { publicKeyFromSecret, submitNativePayment } from "../services/stellar.js";
+import { parseSignedNativePayment, prepareNativePayment, submitSignedNativePayment, ParsedSignedNativePayment } from "../services/stellar.js";
+import { config } from "../config/env.js";
 
 const nativeAssetSchema = z.object({
     type: z.literal("native"),
@@ -17,11 +18,18 @@ const issuedAssetSchema = z.object({
     issuer: z.string().trim().min(1),
 });
 
-const createPaymentSchema = z.object({
+const submitPaymentSchema = z.object({
     idempotency_key: z.string().trim().min(1),
-    source_secret: z.string().trim().min(1),
-    destination: z.string().trim().min(1),
-    amount: z.string().trim().regex(/^\d+(\.\d{1,7})?$/, "amount must be a decimal string with up to 7 decimal places"),
+    signed_transaction: z.string().trim().min(1),
+});
+
+const stellarPublicKeySchema = z.string().trim().regex(/^G[A-Z2-7]{55}$/, "account must be a Stellar public key");
+const amountSchema = z.string().trim().regex(/^\d+(\.\d{1,7})?$/, "amount must be a decimal string with up to 7 decimal places");
+
+const preparePaymentSchema = z.object({
+    source_account: stellarPublicKeySchema,
+    destination: stellarPublicKeySchema,
+    amount: amountSchema,
     asset: z.discriminatedUnion("type", [nativeAssetSchema, issuedAssetSchema]).default({ type: "native" }),
     memo: z.string().trim().min(1).max(28).optional(),
 });
@@ -29,7 +37,7 @@ const createPaymentSchema = z.object({
 const uuidSchema = z.string().uuid();
 const txHashSchema = z.string().regex(/^[a-fA-F0-9]{64}$/, "tx hash must be 64 hex characters");
 const listTransactionsQuerySchema = z.object({
-    account: z.string().trim().regex(/^G[A-Z2-7]{55}$/, "account must be a Stellar public key").optional(),
+    account: stellarPublicKeySchema.optional(),
     limit: z.coerce.number().int().min(1).max(100).default(20),
     offset: z.coerce.number().int().min(0).default(0),
 });
@@ -53,6 +61,42 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         return reply.send({
             transactions: transactions.map(serializeTransaction),
         });
+    });
+
+    app.post("/tx/prepare", async (request, reply) => {
+        const parsed = preparePaymentSchema.safeParse(request.body);
+        if (!parsed.success) {
+            return reply.status(400).send({
+                error: "validation_error",
+                details: parsed.error.flatten().fieldErrors,
+            });
+        }
+
+        if (parsed.data.asset.type !== "native") {
+            return reply.status(400).send({
+                error: "unsupported_asset",
+                message: "Only native XLM payments are supported for transaction preparation.",
+            });
+        }
+
+        try {
+            const transaction = await prepareNativePayment({
+                sourceAccount: parsed.data.source_account,
+                destination: parsed.data.destination,
+                amount: parsed.data.amount,
+                memo: parsed.data.memo,
+            });
+
+            return reply.send({
+                network_passphrase: config.stellarNetworkPassphrase,
+                transaction,
+            });
+        } catch (err) {
+            return reply.status(400).send({
+                error: "transaction_prepare_failed",
+                message: err instanceof Error ? err.message : "Unable to prepare transaction",
+            });
+        }
     });
 
     app.get("/tx/:id", async (request, reply) => {
@@ -89,8 +133,8 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         });
     });
 
-    app.post("/tx/payment", async (request, reply) => {
-        const parsed = createPaymentSchema.safeParse(request.body);
+    app.post("/tx/submit", async (request, reply) => {
+        const parsed = submitPaymentSchema.safeParse(request.body);
         if (!parsed.success) {
             return reply.status(400).send({
                 error: "validation_error",
@@ -98,49 +142,87 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        if (parsed.data.asset.type !== "native") {
+        let signedPayment: ParsedSignedNativePayment;
+        try {
+            signedPayment = parseSignedNativePayment(parsed.data.signed_transaction);
+        } catch (err) {
             return reply.status(400).send({
-                error: "unsupported_asset",
-                message: "Only native XLM payments are supported for this first Stellar submission slice.",
+                error: "transaction_parse_failed",
+                message: err instanceof Error ? err.message : "Unable to parse signed transaction",
+            });
+        }
+
+        const conflictingTransaction = await findTransactionByHash(signedPayment.hash);
+        if (conflictingTransaction && conflictingTransaction.idempotencyKey !== parsed.data.idempotency_key) {
+            return reply.status(409).send({
+                error: "idempotency_conflict",
+                message: "This signed transaction hash is already associated with a different idempotency key.",
             });
         }
 
         const { transaction, idempotentReplay } = await createPaymentTransaction({
             idempotencyKey: parsed.data.idempotency_key,
-            sourceAccount: publicKeyFromSecret(parsed.data.source_secret),
-            destinationAccount: parsed.data.destination,
-            amount: parsed.data.amount,
-            asset: parsed.data.asset,
-            memo: parsed.data.memo,
+            sourceAccount: signedPayment.sourceAccount,
+            destinationAccount: signedPayment.destination,
+            amount: signedPayment.amount,
+            asset: { type: "native" },
+            memo: signedPayment.memo,
+            txHash: signedPayment.hash,
         });
 
-        let responseTransaction = transaction;
-
-        if (!idempotentReplay) {
-            try {
-                const paymentInput = {
-                    sourceSecret: parsed.data.source_secret,
-                    destination: transaction.destinationAccount,
-                    amount: transaction.amount,
-                    memo: transaction.memo ?? undefined,
-                };
-
-                const paymentResult = await submitNativePayment(paymentInput);
-
-                responseTransaction = await markTransactionSubmitted(transaction.id, {
-                    txHash: paymentResult.hash,
-                    envelopeXdr: paymentResult.envelopeXdr,
-                    resultXdr: paymentResult.resultXdr,
-                });
-            } catch (err) {
-                responseTransaction = await markTransactionFailed(transaction.id, parseHorizonError(err));
-            }
+        if (transaction.txHash && transaction.txHash !== signedPayment.hash) {
+            return reply.status(409).send({
+                error: "idempotency_conflict",
+                message: "This idempotency key is already bound to a different transaction hash.",
+            });
         }
 
-        return reply.status(idempotentReplay ? 200 : 201).send({
-            idempotent_replay: idempotentReplay,
-            transaction: serializeTransaction(responseTransaction),
-        });
+        const terminalStatuses = ["submitting", "submitted", "failed"];
+        if (terminalStatuses.includes(transaction.status)) {
+            return reply.status(idempotentReplay ? 200 : 202).send({
+                idempotent_replay: idempotentReplay,
+                transaction: serializeTransaction(transaction),
+            });
+        }
+
+        const claimedTransaction = transaction.status === "created"
+            ? await claimTransactionForSubmission(transaction.idempotencyKey)
+            : undefined;
+
+        if (!claimedTransaction) {
+            return reply.status(409).send({
+                error: "transaction_in_progress",
+                message: "Transaction is already in progress.",
+            });
+        }
+
+        try {
+            const paymentResult = await submitSignedNativePayment(signedPayment.transaction);
+
+            const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
+                txHash: paymentResult.hash,
+                envelopeXdr: paymentResult.envelopeXdr,
+                resultXdr: paymentResult.resultXdr,
+            });
+
+            if (!responseTransaction) {
+                return reply.status(409).send({
+                    error: "submission_state_conflict",
+                    message: "Transaction was no longer in submitting state.",
+                });
+            }
+
+            return reply.status(idempotentReplay ? 200 : 201).send({
+                idempotent_replay: idempotentReplay,
+                transaction: serializeTransaction(responseTransaction),
+            });
+        } catch (err) {
+            const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseHorizonError(err));
+            return reply.status(400).send({
+                idempotent_replay: idempotentReplay,
+                transaction: serializeTransaction(responseTransaction ?? claimedTransaction),
+            });
+        }
     });
 }
 
