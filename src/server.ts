@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { config } from "./config/env.js";
 import { createLogger } from "./lib/logger.js";
+import { authRoutes } from "./routes/auth.js";
 import { accountRoutes } from "./routes/accounts.js";
 import { healthRoutes } from "./routes/health.js";
 import { transactionRoutes } from "./routes/transactions.js";
@@ -18,6 +19,7 @@ const webRoot = path.resolve(__dirname, "../web");
 async function main(): Promise<void> {
   try {
     await app.register(accountRoutes);
+    await app.register(authRoutes);
     await app.register(healthRoutes);
     await app.register(transactionRoutes);
 

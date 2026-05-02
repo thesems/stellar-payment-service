@@ -15,6 +15,13 @@ const envSchema = z.object({
   STELLAR_NETWORK: z.enum(["testnet"]).default("testnet"),
   STELLAR_HORIZON_URL: z.string().trim().url().default("https://horizon-testnet.stellar.org"),
   STELLAR_NETWORK_PASSPHRASE: z.string().trim().min(1).default("Test SDF Network ; September 2015"),
+  SEP10_ENABLED: z.preprocess(parseBoolean, z.boolean().default(false)),
+  SEP10_HOME_DOMAINS: z.string().trim().min(1).default("localhost"),
+  SEP10_WEB_AUTH_DOMAIN: z.string().trim().min(1).default("localhost"),
+  SEP10_SIGNING_SECRET: z.string().trim().optional(),
+  SEP10_JWT_SECRET: z.string().trim().optional(),
+  SEP10_AUTH_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
+  SEP10_JWT_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(86400),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   WORKER_SUBMITTED_TIMEOUT_MINUTES: z.coerce.number().int().positive().default(20),
   LOG_PRETTY: z.preprocess(parseBoolean, z.boolean().default(true)),
@@ -27,6 +34,20 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+if (parsed.data.SEP10_ENABLED) {
+  if (!parsed.data.SEP10_SIGNING_SECRET) {
+    console.error("Invalid configuration:");
+    console.error({ SEP10_SIGNING_SECRET: ["SEP10_SIGNING_SECRET is required when SEP10_ENABLED=true"] });
+    process.exit(1);
+  }
+
+  if (!parsed.data.SEP10_JWT_SECRET) {
+    console.error("Invalid configuration:");
+    console.error({ SEP10_JWT_SECRET: ["SEP10_JWT_SECRET is required when SEP10_ENABLED=true"] });
+    process.exit(1);
+  }
+}
+
 export const config = {
   host: parsed.data.HOST,
   port: parsed.data.PORT,
@@ -34,6 +55,13 @@ export const config = {
   stellarNetwork: parsed.data.STELLAR_NETWORK,
   stellarHorizonUrl: parsed.data.STELLAR_HORIZON_URL,
   stellarNetworkPassphrase: parsed.data.STELLAR_NETWORK_PASSPHRASE,
+  sep10Enabled: parsed.data.SEP10_ENABLED,
+  sep10HomeDomains: parsed.data.SEP10_HOME_DOMAINS.split(",").map((value) => value.trim()).filter(Boolean),
+  sep10WebAuthDomain: parsed.data.SEP10_WEB_AUTH_DOMAIN,
+  sep10SigningSecret: parsed.data.SEP10_SIGNING_SECRET ?? null,
+  sep10JwtSecret: parsed.data.SEP10_JWT_SECRET ?? null,
+  sep10AuthTimeoutSeconds: parsed.data.SEP10_AUTH_TIMEOUT_SECONDS,
+  sep10JwtTimeoutSeconds: parsed.data.SEP10_JWT_TIMEOUT_SECONDS,
   workerPollIntervalMs: parsed.data.WORKER_POLL_INTERVAL_MS,
   workerSubmittedTimeoutMinutes: parsed.data.WORKER_SUBMITTED_TIMEOUT_MINUTES,
   logPretty: parsed.data.LOG_PRETTY,
