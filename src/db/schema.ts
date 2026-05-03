@@ -25,6 +25,7 @@ export const transactions = pgTable("transactions", {
   assetIssuer: text("asset_issuer"),
   amount: text("amount").notNull(),
   memo: text("memo"),
+  preparedXdr: text("prepared_xdr"),
   txHash: text("tx_hash").unique(),
   envelopeXdr: text("envelope_xdr"),
   resultXdr: text("result_xdr"),

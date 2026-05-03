@@ -76,6 +76,24 @@ export async function claimTransactionForSubmission(
     return rows[0];
 }
 
+export async function claimTransactionForSubmissionById(
+    id: string,
+): Promise<Transaction | undefined> {
+    const rows = await db
+        .update(transactions)
+        .set({
+            status: "submitting",
+            updatedAt: new Date(),
+        })
+        .where(and(
+            eq(transactions.id, id),
+            eq(transactions.status, "created"),
+        ))
+        .returning();
+
+    return rows[0];
+}
+
 export async function findSubmittedTransactions(): Promise<Transaction[]> {
     return db
         .select()

@@ -19,6 +19,8 @@ export type ParsedSignedNativePayment = {
     memo?: string | undefined;
 };
 
+export type ParsedNativePayment = ParsedSignedNativePayment;
+
 type SubmittedStellarTransaction = {
     sourceAccount: string;
     hash: string;
@@ -48,12 +50,23 @@ export async function prepareNativePayment(input: PrepareNativePaymentInput): Pr
 }
 
 export function parseSignedNativePayment(signedTransaction: string): ParsedSignedNativePayment {
-    const transaction = TransactionBuilder.fromXDR(signedTransaction, config.stellarNetworkPassphrase);
+    return parseNativePaymentTransaction(signedTransaction, { requireSignature: true });
+}
+
+export function parsePreparedNativePayment(preparedTransaction: string): ParsedNativePayment {
+    return parseNativePaymentTransaction(preparedTransaction, { requireSignature: false });
+}
+
+function parseNativePaymentTransaction(
+    envelopeXdr: string,
+    options: { requireSignature: boolean },
+): ParsedNativePayment {
+    const transaction = TransactionBuilder.fromXDR(envelopeXdr, config.stellarNetworkPassphrase);
     if (transaction instanceof FeeBumpTransaction) {
-        throw new Error("Only signed native payment transactions are supported.");
+        throw new Error("Only native payment transactions are supported.");
     }
 
-    if (transaction.signatures.length === 0) {
+    if (options.requireSignature && transaction.signatures.length === 0) {
         throw new Error("Signed transaction must include at least one signature.");
     }
 

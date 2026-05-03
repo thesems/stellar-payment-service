@@ -8,7 +8,7 @@ vi.mock("./client.js", () => ({
   },
 }));
 
-const { claimTransactionForSubmission } = await import("./transaction-repository.js");
+const { claimTransactionForSubmission, claimTransactionForSubmissionById } = await import("./transaction-repository.js");
 
 describe("claimTransactionForSubmission", () => {
   it("moves a created transaction into submitting", async () => {
@@ -28,6 +28,29 @@ describe("claimTransactionForSubmission", () => {
     expect(result).toMatchObject({
       status: "submitting",
       idempotencyKey: "payment-001",
+    });
+    expect(dbUpdate).toHaveBeenCalled();
+  });
+});
+
+describe("claimTransactionForSubmissionById", () => {
+  it("moves a created transaction into submitting by id", async () => {
+    const returning = vi.fn().mockResolvedValue([
+      {
+        id: "tx-1",
+        idempotencyKey: "payment-001",
+        status: "submitting",
+      },
+    ]);
+    const where = vi.fn().mockReturnValue({ returning });
+    const set = vi.fn().mockReturnValue({ where });
+    dbUpdate.mockReturnValue({ set });
+
+    const result = await claimTransactionForSubmissionById("tx-1");
+
+    expect(result).toMatchObject({
+      status: "submitting",
+      id: "tx-1",
     });
     expect(dbUpdate).toHaveBeenCalled();
   });

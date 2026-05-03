@@ -3,9 +3,9 @@ import { z } from "zod";
 
 import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
-import { claimTransactionForSubmission, findTransactionByHash, findTransactionById, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
+import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
 import { parseHorizonError } from "../services/horizon-error-parser.js";
-import { parseSignedNativePayment, prepareNativePayment, submitSignedNativePayment, ParsedSignedNativePayment } from "../services/stellar.js";
+import { parsePreparedNativePayment, parseSignedNativePayment, prepareNativePayment, submitSignedNativePayment, ParsedSignedNativePayment } from "../services/stellar.js";
 import { config } from "../config/env.js";
 
 const nativeAssetSchema = z.object({
@@ -19,7 +19,7 @@ const issuedAssetSchema = z.object({
 });
 
 const submitPaymentSchema = z.object({
-    idempotency_key: z.string().trim().min(1),
+    transaction_id: z.string().uuid(),
     signed_transaction: z.string().trim().min(1),
 });
 
@@ -27,6 +27,7 @@ const stellarPublicKeySchema = z.string().trim().regex(/^G[A-Z2-7]{55}$/, "accou
 const amountSchema = z.string().trim().regex(/^\d+(\.\d{1,7})?$/, "amount must be a decimal string with up to 7 decimal places");
 
 const preparePaymentSchema = z.object({
+    idempotency_key: z.string().trim().min(1),
     source_account: stellarPublicKeySchema,
     destination: stellarPublicKeySchema,
     amount: amountSchema,
@@ -66,6 +67,9 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
     app.post("/tx/prepare", async (request, reply) => {
         const parsed = preparePaymentSchema.safeParse(request.body);
         if (!parsed.success) {
+            request.log.warn({
+                details: parsed.error.flatten().fieldErrors,
+            }, "transaction prepare validation failed");
             return reply.status(400).send({
                 error: "validation_error",
                 details: parsed.error.flatten().fieldErrors,
@@ -79,19 +83,81 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
+        const existingTransaction = await findTransactionByIdempotencyKey(parsed.data.idempotency_key);
+        if (existingTransaction) {
+            if (!samePreparedPayment(existingTransaction, {
+                sourceAccount: parsed.data.source_account,
+                destinationAccount: parsed.data.destination,
+                amount: parsed.data.amount,
+                memo: parsed.data.memo,
+            })) {
+                return reply.status(409).send({
+                    error: "idempotency_conflict",
+                    message: "This idempotency key is already bound to a different prepared transaction.",
+                });
+            }
+
+            return reply.send({
+                idempotent_replay: true,
+                network_passphrase: config.stellarNetworkPassphrase,
+                prepared_transaction: existingTransaction.status === "created" ? existingTransaction.preparedXdr : null,
+                transaction: serializeTransaction(existingTransaction),
+            });
+        }
+
         try {
-            const transaction = await prepareNativePayment({
+            request.log.info({
+                sourceAccount: parsed.data.source_account,
+                destination: parsed.data.destination,
+                amount: parsed.data.amount,
+                memo: parsed.data.memo ?? null,
+            }, "preparing native payment transaction");
+            const preparedXdr = await prepareNativePayment({
                 sourceAccount: parsed.data.source_account,
                 destination: parsed.data.destination,
                 amount: parsed.data.amount,
                 memo: parsed.data.memo,
             });
+            const { transaction, idempotentReplay } = await createPaymentTransaction({
+                idempotencyKey: parsed.data.idempotency_key,
+                sourceAccount: parsed.data.source_account,
+                destinationAccount: parsed.data.destination,
+                amount: parsed.data.amount,
+                asset: { type: "native" },
+                memo: parsed.data.memo,
+                preparedXdr,
+            });
+            if (!samePreparedPayment(transaction, {
+                sourceAccount: parsed.data.source_account,
+                destinationAccount: parsed.data.destination,
+                amount: parsed.data.amount,
+                memo: parsed.data.memo,
+            })) {
+                return reply.status(409).send({
+                    error: "idempotency_conflict",
+                    message: "This idempotency key is already bound to a different prepared transaction.",
+                });
+            }
 
-            return reply.send({
+            request.log.info({
+                idempotencyKey: parsed.data.idempotency_key,
+                sourceAccount: parsed.data.source_account,
+                destination: parsed.data.destination,
+                amount: parsed.data.amount,
+            }, "transaction prepared");
+            return reply.status(idempotentReplay ? 200 : 201).send({
+                idempotent_replay: idempotentReplay,
                 network_passphrase: config.stellarNetworkPassphrase,
-                transaction,
+                prepared_transaction: transaction.status === "created" ? transaction.preparedXdr : null,
+                transaction: serializeTransaction(transaction),
             });
         } catch (err) {
+            request.log.error({
+                err,
+                sourceAccount: parsed.data.source_account,
+                destination: parsed.data.destination,
+                amount: parsed.data.amount,
+            }, "transaction prepare failed");
             return reply.status(400).send({
                 error: "transaction_prepare_failed",
                 message: err instanceof Error ? err.message : "Unable to prepare transaction",
@@ -136,6 +202,9 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
     app.post("/tx/submit", async (request, reply) => {
         const parsed = submitPaymentSchema.safeParse(request.body);
         if (!parsed.success) {
+            request.log.warn({
+                details: parsed.error.flatten().fieldErrors,
+            }, "transaction submit validation failed");
             return reply.status(400).send({
                 error: "validation_error",
                 details: parsed.error.flatten().fieldErrors,
@@ -146,50 +215,80 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         try {
             signedPayment = parseSignedNativePayment(parsed.data.signed_transaction);
         } catch (err) {
+            request.log.warn({
+                err,
+                transactionId: parsed.data.transaction_id,
+            }, "signed transaction parse failed");
             return reply.status(400).send({
                 error: "transaction_parse_failed",
                 message: err instanceof Error ? err.message : "Unable to parse signed transaction",
             });
         }
 
+        const transaction = await findTransactionById(parsed.data.transaction_id);
+        if (!transaction) {
+            return reply.status(404).send({
+                error: "transaction_not_found",
+            });
+        }
+
+        if (transaction.status !== "created") {
+            return reply.status(409).send({
+                error: "transaction_not_submittable",
+                message: "Only created transactions can be submitted.",
+                transaction: serializeTransaction(transaction),
+            });
+        }
+
+        if (!transaction.preparedXdr) {
+            return reply.status(409).send({
+                error: "transaction_not_prepared",
+                message: "Transaction does not have a prepared envelope XDR.",
+                transaction: serializeTransaction(transaction),
+            });
+        }
+
+        let preparedPayment: ParsedSignedNativePayment;
+        try {
+            preparedPayment = parsePreparedNativePayment(transaction.preparedXdr);
+        } catch (err) {
+            request.log.warn({
+                err,
+                transactionId: parsed.data.transaction_id,
+            }, "prepared transaction parse failed");
+            return reply.status(409).send({
+                error: "prepared_transaction_invalid",
+                message: err instanceof Error ? err.message : "Unable to parse prepared transaction",
+            });
+        }
+
+        if (!matchesStoredPayment(transaction, signedPayment) || signedPayment.hash !== preparedPayment.hash) {
+            return reply.status(409).send({
+                error: "transaction_mismatch",
+                message: "Signed transaction does not match the prepared transaction.",
+                transaction: serializeTransaction(transaction),
+            });
+        }
+
         const conflictingTransaction = await findTransactionByHash(signedPayment.hash);
-        if (conflictingTransaction && conflictingTransaction.idempotencyKey !== parsed.data.idempotency_key) {
+        if (conflictingTransaction && conflictingTransaction.id !== transaction.id) {
+            request.log.warn({
+                transactionId: parsed.data.transaction_id,
+                txHash: signedPayment.hash,
+            }, "transaction hash conflict");
             return reply.status(409).send({
                 error: "idempotency_conflict",
                 message: "This signed transaction hash is already associated with a different idempotency key.",
             });
         }
 
-        const { transaction, idempotentReplay } = await createPaymentTransaction({
-            idempotencyKey: parsed.data.idempotency_key,
-            sourceAccount: signedPayment.sourceAccount,
-            destinationAccount: signedPayment.destination,
-            amount: signedPayment.amount,
-            asset: { type: "native" },
-            memo: signedPayment.memo,
-            txHash: signedPayment.hash,
-        });
-
-        if (transaction.txHash && transaction.txHash !== signedPayment.hash) {
-            return reply.status(409).send({
-                error: "idempotency_conflict",
-                message: "This idempotency key is already bound to a different transaction hash.",
-            });
-        }
-
-        const terminalStatuses = ["submitting", "submitted", "failed"];
-        if (terminalStatuses.includes(transaction.status)) {
-            return reply.status(idempotentReplay ? 200 : 202).send({
-                idempotent_replay: idempotentReplay,
-                transaction: serializeTransaction(transaction),
-            });
-        }
-
-        const claimedTransaction = transaction.status === "created"
-            ? await claimTransactionForSubmission(transaction.idempotencyKey)
-            : undefined;
+        const claimedTransaction = await claimTransactionForSubmissionById(transaction.id);
 
         if (!claimedTransaction) {
+            request.log.warn({
+                transactionId: parsed.data.transaction_id,
+                txHash: signedPayment.hash,
+            }, "transaction already in progress");
             return reply.status(409).send({
                 error: "transaction_in_progress",
                 message: "Transaction is already in progress.",
@@ -197,6 +296,13 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         }
 
         try {
+            request.log.info({
+                transactionId: parsed.data.transaction_id,
+                txHash: signedPayment.hash,
+                sourceAccount: signedPayment.sourceAccount,
+                destination: signedPayment.destination,
+                amount: signedPayment.amount,
+            }, "submitting signed native payment");
             const paymentResult = await submitSignedNativePayment(signedPayment.transaction);
 
             const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
@@ -206,20 +312,33 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
 
             if (!responseTransaction) {
+                request.log.warn({
+                    transactionId: parsed.data.transaction_id,
+                    txHash: signedPayment.hash,
+                }, "submission state conflict");
                 return reply.status(409).send({
                     error: "submission_state_conflict",
                     message: "Transaction was no longer in submitting state.",
                 });
             }
 
-            return reply.status(idempotentReplay ? 200 : 201).send({
-                idempotent_replay: idempotentReplay,
+            request.log.info({
+                transactionId: parsed.data.transaction_id,
+                txHash: paymentResult.hash,
+            }, "transaction submitted");
+            return reply.status(201).send({
+                idempotent_replay: false,
                 transaction: serializeTransaction(responseTransaction),
             });
         } catch (err) {
+            request.log.error({
+                err,
+                transactionId: parsed.data.transaction_id,
+                txHash: signedPayment.hash,
+            }, "transaction submission failed");
             const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseHorizonError(err));
             return reply.status(400).send({
-                idempotent_replay: idempotentReplay,
+                idempotent_replay: false,
                 transaction: serializeTransaction(responseTransaction ?? claimedTransaction),
             });
         }
@@ -236,12 +355,48 @@ function serializeTransaction(transaction: Transaction) {
         amount: transaction.amount,
         asset: serializeAsset(transaction),
         memo: transaction.memo,
+        prepared_transaction: transaction.status === "created" ? transaction.preparedXdr : null,
+        network_passphrase: transaction.status === "created" ? config.stellarNetworkPassphrase : null,
         tx_hash: transaction.txHash,
         error_code: transaction.errorCode,
         error_message: transaction.errorMessage,
         created_at: transaction.createdAt.toISOString(),
         updated_at: transaction.updatedAt.toISOString(),
     };
+}
+
+function samePreparedPayment(
+    transaction: Transaction,
+    input: {
+        sourceAccount: string;
+        destinationAccount: string;
+        amount: string;
+        memo?: string | undefined;
+    },
+): boolean {
+    return transaction.sourceAccount === input.sourceAccount
+        && transaction.destinationAccount === input.destinationAccount
+        && sameStellarAmount(transaction.amount, input.amount)
+        && (transaction.memo ?? undefined) === (input.memo ?? undefined)
+        && transaction.assetType === "native";
+}
+
+function matchesStoredPayment(transaction: Transaction, signedPayment: ParsedSignedNativePayment): boolean {
+    return transaction.sourceAccount === signedPayment.sourceAccount
+        && transaction.destinationAccount === signedPayment.destination
+        && sameStellarAmount(transaction.amount, signedPayment.amount)
+        && (transaction.memo ?? undefined) === (signedPayment.memo ?? undefined)
+        && transaction.assetType === "native";
+}
+
+function sameStellarAmount(left: string, right: string): boolean {
+    return normalizeStellarAmount(left) === normalizeStellarAmount(right);
+}
+
+function normalizeStellarAmount(amount: string): string {
+    const [whole = "0", fraction = ""] = amount.split(".");
+    const normalizedWhole = whole.replace(/^0+(?=\d)/, "");
+    return `${normalizedWhole}.${fraction.padEnd(7, "0").slice(0, 7)}`;
 }
 
 function serializeAsset(transaction: Transaction) {

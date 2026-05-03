@@ -30,7 +30,7 @@ export function formatError(error) {
     return JSON.stringify(
       {
         error: "request_failed",
-        message: error.message,
+        message: error.message || "Unknown error",
         details: error.response ?? null,
       },
       null,
@@ -38,7 +38,19 @@ export function formatError(error) {
     );
   }
 
-  return prettyPrint({ error: "request_failed", message: "Unknown error" });
+  if (error && typeof error === "object") {
+    return JSON.stringify(
+      {
+        error: "request_failed",
+        message: extractMessage(error),
+        details: error,
+      },
+      null,
+      2,
+    );
+  }
+
+  return prettyPrint({ error: "request_failed", message: extractMessage(error) });
 }
 
 function safeParseJson(text) {
@@ -47,4 +59,27 @@ function safeParseJson(text) {
   } catch {
     return { raw: text };
   }
+}
+
+function extractMessage(error) {
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error && typeof error === "object") {
+    const record = error;
+    if (typeof record.message === "string" && record.message) {
+      return record.message;
+    }
+
+    if (typeof record.error === "string" && record.error) {
+      return record.error;
+    }
+
+    if (typeof record.apiError === "string" && record.apiError) {
+      return record.apiError;
+    }
+  }
+
+  return "Unknown error";
 }
