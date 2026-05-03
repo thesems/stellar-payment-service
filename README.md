@@ -10,7 +10,7 @@ It also serves a small browser UI from the same Fastify process. The frontend is
 
 ## Implemented
 
-- Native XLM payment preparation and submission on Stellar testnet.
+- Native XLM and classic issued-asset payment preparation and submission on Stellar testnet.
 - Idempotency via unique `idempotency_key` during transaction creation.
 - Persistent transaction state in Postgres.
 - Transaction lookup by internal UUID or Stellar hash.
@@ -40,7 +40,7 @@ The API owns validation, idempotency, transaction building, and submission. Wall
 
 ### `POST /tx/prepare`
 
-Creates a transaction with status `created` and stores an unsigned native XLM payment transaction for wallet signing.
+Creates a transaction with status `created` and stores an unsigned Stellar payment transaction for wallet signing.
 
 ```json
 {
@@ -53,11 +53,25 @@ Creates a transaction with status `created` and stores an unsigned native XLM pa
 }
 ```
 
+For classic issued assets such as USDC or EURC, pass the exact asset identity:
+
+```json
+{
+  "asset": {
+    "type": "credit_alphanum4",
+    "code": "USDC",
+    "issuer": "G..."
+  }
+}
+```
+
+Issued assets are identified by both code and issuer. The source account must have enough balance for the requested asset, and the destination account must already have a trustline for that exact asset unless the destination is the issuer.
+
 The response contains the transaction record, Stellar network passphrase, and unsigned transaction envelope XDR. This is used by the wallet flow in the browser UI.
 
 ### `POST /tx/submit`
 
-Submits a wallet-signed native XLM payment for an existing `created` transaction.
+Submits a wallet-signed payment for an existing `created` transaction.
 
 ```json
 {
@@ -159,6 +173,6 @@ STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 
 ## Scope
 
-Implemented: testnet XLM payment preparation and wallet-based submission, idempotent submission, Horizon reads, persisted lifecycle state, polling confirmation worker, React/Vite browser UI, basic tests.
+Implemented: testnet XLM and classic issued-asset payment preparation, wallet-based submission, idempotent submission, Horizon reads, persisted lifecycle state, polling confirmation worker, React/Vite browser UI, basic tests.
 
-Not implemented: mainnet, authentication, production custody, issued asset payments, Soroban calls.
+Not implemented: mainnet, authentication, production custody, Soroban calls.

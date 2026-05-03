@@ -519,7 +519,8 @@ h1 {
   font-size: 0.84rem;
 }
 
-.form input {
+.form input,
+.form select {
   width: 100%;
   padding: 10px 11px;
   border-radius: 12px;
@@ -530,7 +531,8 @@ h1 {
   outline: none;
 }
 
-.form input:focus {
+.form input:focus,
+.form select:focus {
   border-color: rgba(110, 211, 207, 0.6);
   box-shadow: 0 0 0 3px rgba(110, 211, 207, 0.12);
 }

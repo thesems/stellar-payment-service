@@ -10,13 +10,14 @@ import {
 import { TransactionTable } from "./components/TransactionTable.jsx";
 import { Card, Field, OutputPane, TabButton } from "./components/ui.jsx";
 import { formatError, prettyPrint, requestJson } from "../js/http.js";
-import { shortenAddress } from "./utils/formatters.js";
+import { describeAsset, shortenAddress } from "./utils/formatters.js";
 import brandMarkUrl from "../favicon.svg";
 import "../styles.css";
 
 const DEFAULT_CREATE_TRANSACTION = {
   destination: "",
   amount: "",
+  asset_key: "",
   memo: "",
   idempotency_key: "xlm-demo-001",
 };
@@ -59,6 +60,13 @@ function App() {
     label: "Freighter: idle",
     hint: "No wallet connected yet.",
     output: "No response yet.",
+  });
+  const [currentAccount, setCurrentAccount] = useState({
+    address: "",
+    network: null,
+    data: null,
+    loading: false,
+    error: "",
   });
 
   useEffect(() => {
@@ -144,6 +152,42 @@ function App() {
     }
   }
 
+  async function loadCurrentAccount(address, network = currentAccount.network) {
+    setCurrentAccount((current) => ({
+      ...current,
+      address,
+      network,
+      loading: true,
+      error: "",
+    }));
+
+    try {
+      const data = await requestJson(`/account/${encodeURIComponent(address)}`);
+      const nextState = {
+        address,
+        network,
+        data,
+        loading: false,
+        error: "",
+      };
+      const assets = deriveSendableAssets(data?.balances ?? []);
+
+      setCurrentAccount(nextState);
+
+      return nextState;
+    } catch (error) {
+      const nextState = {
+        address,
+        network,
+        data: null,
+        loading: false,
+        error: describeError(error),
+      };
+      setCurrentAccount(nextState);
+      throw error;
+    }
+  }
+
   async function loadTransactionList(overrides = {}) {
     const nextForm = {
       ...transactionListForm,
@@ -196,6 +240,7 @@ function App() {
 
       const address = await readFreighterAddress();
       const network = await readFreighterNetwork();
+      const accountState = address ? await loadCurrentAccount(address, network) : null;
 
       setFreighter({
         className: "status-ok",
@@ -206,6 +251,7 @@ function App() {
           connected: true,
           address,
           network,
+          account: accountState?.data ?? null,
         }),
       });
     } catch (error) {
@@ -233,12 +279,13 @@ function App() {
         throw new Error(access.error.message ?? access.error);
       }
 
-      const address = access?.address ?? (await readFreighterAddress());
+      const address = access?.address;
       if (!address) {
         throw new Error("Freighter did not return a public key.");
       }
 
       const network = await readFreighterNetwork();
+      const accountState = await loadCurrentAccount(address, network);
       setFreighter({
         className: "status-ok",
         label: "Freighter: ready",
@@ -246,6 +293,7 @@ function App() {
         output: prettyPrint({
           address,
           network,
+          account: accountState.data,
         }),
       });
     } catch (error) {
@@ -276,9 +324,24 @@ function App() {
         throw new Error(describeFreighterApiError(access.error));
       }
 
-      const address = access?.address ?? (await readFreighterAddress());
+      const address = access?.address;
       if (!address) {
         throw new Error("Freighter did not return a public key.");
+      }
+      if (currentAccount.address && address !== currentAccount.address) {
+        throw new Error(`Freighter is connected as ${shortenAddress(address)}, but the modal is using ${shortenAddress(currentAccount.address)}. Reconnect before creating the transaction.`);
+      }
+      const network = await readFreighterNetwork();
+      const accountState = currentAccount.address === address && currentAccount.data
+        ? currentAccount
+        : await loadCurrentAccount(address, network);
+      const sendableAssets = deriveSendableAssets(accountState.data?.balances ?? []);
+      if (sendableAssets.length === 0) {
+        throw new Error("The connected account has no sendable assets.");
+      }
+      const selectedAsset = sendableAssets.find((asset) => asset.key === createTransactionForm.asset_key)?.asset;
+      if (!selectedAsset) {
+        throw new Error("The selected asset is no longer available on the connected account.");
       }
 
       const destination = createTransactionForm.destination.trim();
@@ -297,6 +360,7 @@ function App() {
         address,
         destination,
         amount,
+        asset: selectedAsset,
         memo: memo || null,
       });
       const preparePayload = {
@@ -304,7 +368,7 @@ function App() {
         source_account: address,
         destination,
         amount,
-        asset: { type: "native" },
+        asset: selectedAsset,
         ...(memo ? { memo } : {}),
       };
 
@@ -316,6 +380,7 @@ function App() {
       setCreateTransactionOutput(prettyPrint(prepared));
       setCreateTransactionModalOpen(false);
       await loadTransactionList({ offset: "0" });
+      await loadCurrentAccount(address, network);
       setFreighter({
         className: "status-ok",
         label: "Freighter: ready",
@@ -357,7 +422,7 @@ function App() {
         throw new Error(describeFreighterApiError(access.error));
       }
 
-      const address = access?.address ?? (await readFreighterAddress());
+      const address = access?.address;
       if (!address) {
         throw new Error("Freighter did not return a public key.");
       }
@@ -396,6 +461,7 @@ function App() {
       });
 
       await loadTransactionList();
+      await loadCurrentAccount(address, network);
       setFreighter({
         className: "status-ok",
         label: "Freighter: ready",
@@ -425,6 +491,11 @@ function App() {
   }
 
   const freighterReady = freighter.className === "status-ok";
+  const sendableAssets = deriveSendableAssets(currentAccount.data?.balances ?? []);
+  const selectedAssetAvailable = sendableAssets.some((asset) => asset.key === createTransactionForm.asset_key);
+  const selectedAssetLabel = selectedAssetAvailable
+    ? sendableAssets.find((asset) => asset.key === createTransactionForm.asset_key)?.label
+    : createTransactionForm.asset_key;
 
   return (
     <main className="shell">
@@ -586,6 +657,34 @@ function App() {
                 value={createTransactionForm.amount}
                 onChange={(value) => setCreateTransactionForm((current) => ({ ...current, amount: value }))}
               />
+              <label>
+                Asset
+                <select
+                  name="asset"
+                  value={createTransactionForm.asset_key}
+                  onChange={(event) => setCreateTransactionForm((current) => ({ ...current, asset_key: event.target.value }))}
+                  disabled={sendableAssets.length === 0}
+                  required
+                >
+                  {sendableAssets.length === 0 ? (
+                    <option value={createTransactionForm.asset_key}>
+                      {createTransactionForm.asset_key ? selectedAssetLabel : "No connected account assets"}
+                    </option>
+                  ) : null}
+                  {createTransactionForm.asset_key && !selectedAssetAvailable ? (
+                    <option value={createTransactionForm.asset_key}>
+                      {selectedAssetLabel}
+                    </option>
+                  ) : null}
+                  {!createTransactionForm.asset_key ? <option value="">Select an asset</option> : null}
+                  {sendableAssets.map((entry) => (
+                    <option key={entry.key} value={entry.key}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {currentAccount.error ? <p className="hint">{currentAccount.error}</p> : null}
               <Field
                 label="Memo"
                 name="memo"
@@ -625,7 +724,11 @@ async function readFreighterAddress() {
     throw new Error(result.error.message ?? result.error);
   }
 
-  return result?.address ?? "";
+  if (!result?.address) {
+    throw new Error("Freighter did not return a public key.");
+  }
+
+  return result.address;
 }
 
 async function readFreighterNetwork() {
@@ -682,6 +785,60 @@ function describeFreighterApiError(error) {
   }
 
   return "Unknown Freighter error";
+}
+
+function deriveSendableAssets(balances) {
+  if (!Array.isArray(balances)) {
+    return [];
+  }
+
+  return balances
+    .map(balanceToAsset)
+    .filter(Boolean)
+    .filter((asset) => Number(asset.balance) > 0)
+    .map((entry) => ({
+      ...entry,
+      key: assetKey(entry.asset),
+      label: `${describeAsset(entry.asset)} (${entry.balance})`,
+    }));
+}
+
+function balanceToAsset(balance) {
+  if (!balance || typeof balance !== "object") {
+    return null;
+  }
+
+  if (balance.asset_type === "native") {
+    return {
+      asset: { type: "native" },
+      balance: String(balance.balance ?? "0"),
+    };
+  }
+
+  if (
+    (balance.asset_type === "credit_alphanum4" || balance.asset_type === "credit_alphanum12")
+    && typeof balance.asset_code === "string"
+    && typeof balance.asset_issuer === "string"
+  ) {
+    return {
+      asset: {
+        type: balance.asset_type,
+        code: balance.asset_code,
+        issuer: balance.asset_issuer,
+      },
+      balance: String(balance.balance ?? "0"),
+    };
+  }
+
+  return null;
+}
+
+function assetKey(asset) {
+  if (asset.type === "native") {
+    return "native";
+  }
+
+  return `${asset.type}:${asset.code}:${asset.issuer}`;
 }
 
 function readWorkspaceTabFromUrl() {

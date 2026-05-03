@@ -5,7 +5,7 @@ import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
 import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
 import { parseHorizonError } from "../services/horizon-error-parser.js";
-import { parsePreparedNativePayment, parseSignedNativePayment, prepareNativePayment, submitSignedNativePayment, ParsedSignedNativePayment } from "../services/stellar.js";
+import { getAccount, parsePreparedPayment, parseSignedPayment, preparePayment, submitSignedPayment, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
 import { config } from "../config/env.js";
 
 const nativeAssetSchema = z.object({
@@ -15,7 +15,23 @@ const nativeAssetSchema = z.object({
 const issuedAssetSchema = z.object({
     type: z.enum(["credit_alphanum4", "credit_alphanum12"]),
     code: z.string().trim().min(1).max(12),
-    issuer: z.string().trim().min(1),
+    issuer: z.string().trim().regex(/^G[A-Z2-7]{55}$/, "issuer must be a Stellar public key"),
+}).superRefine((asset, ctx) => {
+    if (asset.type === "credit_alphanum4" && asset.code.length > 4) {
+        ctx.addIssue({
+            code: "custom",
+            path: ["code"],
+            message: "credit_alphanum4 asset codes must be 1-4 characters",
+        });
+    }
+
+    if (asset.type === "credit_alphanum12" && asset.code.length <= 4) {
+        ctx.addIssue({
+            code: "custom",
+            path: ["code"],
+            message: "credit_alphanum12 asset codes must be 5-12 characters",
+        });
+    }
 });
 
 const submitPaymentSchema = z.object({
@@ -31,7 +47,7 @@ const preparePaymentSchema = z.object({
     source_account: stellarPublicKeySchema,
     destination: stellarPublicKeySchema,
     amount: amountSchema,
-    asset: z.discriminatedUnion("type", [nativeAssetSchema, issuedAssetSchema]).default({ type: "native" }),
+    asset: z.discriminatedUnion("type", [nativeAssetSchema, issuedAssetSchema]),
     memo: z.string().trim().min(1).max(28).optional(),
 });
 
@@ -76,19 +92,13 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        if (parsed.data.asset.type !== "native") {
-            return reply.status(400).send({
-                error: "unsupported_asset",
-                message: "Only native XLM payments are supported for transaction preparation.",
-            });
-        }
-
         const existingTransaction = await findTransactionByIdempotencyKey(parsed.data.idempotency_key);
         if (existingTransaction) {
             if (!samePreparedPayment(existingTransaction, {
                 sourceAccount: parsed.data.source_account,
                 destinationAccount: parsed.data.destination,
                 amount: parsed.data.amount,
+                asset: parsed.data.asset,
                 memo: parsed.data.memo,
             })) {
                 return reply.status(409).send({
@@ -110,12 +120,20 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 sourceAccount: parsed.data.source_account,
                 destination: parsed.data.destination,
                 amount: parsed.data.amount,
+                asset: parsed.data.asset,
                 memo: parsed.data.memo ?? null,
-            }, "preparing native payment transaction");
-            const preparedXdr = await prepareNativePayment({
+            }, "preparing payment transaction");
+
+            await Promise.all([
+                verifySourceCanSendAsset(parsed.data.source_account, parsed.data.asset, parsed.data.amount),
+                verifyDestinationCanReceiveAsset(parsed.data.destination, parsed.data.asset),
+            ]);
+
+            const preparedXdr = await preparePayment({
                 sourceAccount: parsed.data.source_account,
                 destination: parsed.data.destination,
                 amount: parsed.data.amount,
+                asset: parsed.data.asset,
                 memo: parsed.data.memo,
             });
             const { transaction, idempotentReplay } = await createPaymentTransaction({
@@ -123,7 +141,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 sourceAccount: parsed.data.source_account,
                 destinationAccount: parsed.data.destination,
                 amount: parsed.data.amount,
-                asset: { type: "native" },
+                asset: parsed.data.asset,
                 memo: parsed.data.memo,
                 preparedXdr,
             });
@@ -131,6 +149,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 sourceAccount: parsed.data.source_account,
                 destinationAccount: parsed.data.destination,
                 amount: parsed.data.amount,
+                asset: parsed.data.asset,
                 memo: parsed.data.memo,
             })) {
                 return reply.status(409).send({
@@ -158,6 +177,13 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 destination: parsed.data.destination,
                 amount: parsed.data.amount,
             }, "transaction prepare failed");
+            if (err instanceof PaymentPrepareError) {
+                return reply.status(400).send({
+                    error: err.code,
+                    message: err.message,
+                });
+            }
+
             return reply.status(400).send({
                 error: "transaction_prepare_failed",
                 message: err instanceof Error ? err.message : "Unable to prepare transaction",
@@ -211,9 +237,9 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let signedPayment: ParsedSignedNativePayment;
+        let signedPayment: ParsedSignedPayment;
         try {
-            signedPayment = parseSignedNativePayment(parsed.data.signed_transaction);
+            signedPayment = parseSignedPayment(parsed.data.signed_transaction);
         } catch (err) {
             request.log.warn({
                 err,
@@ -248,9 +274,9 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let preparedPayment: ParsedSignedNativePayment;
+        let preparedPayment: ParsedSignedPayment;
         try {
-            preparedPayment = parsePreparedNativePayment(transaction.preparedXdr);
+            preparedPayment = parsePreparedPayment(transaction.preparedXdr);
         } catch (err) {
             request.log.warn({
                 err,
@@ -302,8 +328,9 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 sourceAccount: signedPayment.sourceAccount,
                 destination: signedPayment.destination,
                 amount: signedPayment.amount,
-            }, "submitting signed native payment");
-            const paymentResult = await submitSignedNativePayment(signedPayment.transaction);
+                asset: signedPayment.asset,
+            }, "submitting signed payment");
+            const paymentResult = await submitSignedPayment(signedPayment.transaction);
 
             const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
                 txHash: paymentResult.hash,
@@ -371,6 +398,7 @@ function samePreparedPayment(
         sourceAccount: string;
         destinationAccount: string;
         amount: string;
+        asset: PaymentAsset;
         memo?: string | undefined;
     },
 ): boolean {
@@ -378,15 +406,15 @@ function samePreparedPayment(
         && transaction.destinationAccount === input.destinationAccount
         && sameStellarAmount(transaction.amount, input.amount)
         && (transaction.memo ?? undefined) === (input.memo ?? undefined)
-        && transaction.assetType === "native";
+        && sameAsset(transactionAsset(transaction), input.asset);
 }
 
-function matchesStoredPayment(transaction: Transaction, signedPayment: ParsedSignedNativePayment): boolean {
+function matchesStoredPayment(transaction: Transaction, signedPayment: ParsedSignedPayment): boolean {
     return transaction.sourceAccount === signedPayment.sourceAccount
         && transaction.destinationAccount === signedPayment.destination
         && sameStellarAmount(transaction.amount, signedPayment.amount)
         && (transaction.memo ?? undefined) === (signedPayment.memo ?? undefined)
-        && transaction.assetType === "native";
+        && sameAsset(transactionAsset(transaction), signedPayment.asset);
 }
 
 function sameStellarAmount(left: string, right: string): boolean {
@@ -409,4 +437,116 @@ function serializeAsset(transaction: Transaction) {
         code: transaction.assetCode,
         issuer: transaction.assetIssuer,
     };
+}
+
+function transactionAsset(transaction: Transaction): PaymentAsset {
+    if (transaction.assetType === "native") {
+        return { type: "native" };
+    }
+
+    if (!transaction.assetCode || !transaction.assetIssuer) {
+        throw new Error("issued asset transaction is missing code or issuer");
+    }
+
+    return {
+        type: transaction.assetType,
+        code: transaction.assetCode,
+        issuer: transaction.assetIssuer,
+    };
+}
+
+function sameAsset(left: PaymentAsset, right: PaymentAsset): boolean {
+    if (left.type !== right.type) {
+        return false;
+    }
+
+    if (left.type === "native" && right.type === "native") {
+        return true;
+    }
+
+    if (left.type === "native" || right.type === "native") {
+        return false;
+    }
+
+    return left.code === right.code && left.issuer === right.issuer;
+}
+
+async function verifySourceCanSendAsset(sourceAccount: string, asset: PaymentAsset, amount: string): Promise<void> {
+    const account = await getAccount(sourceAccount);
+    const balance = findAssetBalance(account.balances, asset);
+    if (!balance) {
+        throw new PaymentPrepareError(
+            "source_asset_missing",
+            "Source account does not hold the requested asset.",
+        );
+    }
+
+    if (compareStellarAmounts(balance, amount) < 0) {
+        throw new PaymentPrepareError(
+            "source_insufficient_balance",
+            "Source account balance is lower than the requested payment amount.",
+        );
+    }
+}
+
+async function verifyDestinationCanReceiveAsset(destinationAccount: string, asset: PaymentAsset): Promise<void> {
+    if (asset.type === "native" || destinationAccount === asset.issuer) {
+        return;
+    }
+
+    const account = await getAccount(destinationAccount);
+    if (!findAssetBalance(account.balances, asset)) {
+        throw new PaymentPrepareError(
+            "destination_trustline_missing",
+            "Destination account does not have a trustline for the requested asset.",
+        );
+    }
+}
+
+function findAssetBalance(balances: unknown[], asset: PaymentAsset): string | undefined {
+    for (const balance of balances) {
+        const record = typeof balance === "object" && balance !== null
+            ? balance as Record<string, unknown>
+            : {};
+        if (asset.type === "native") {
+            if (record.asset_type === "native") {
+                return String(record.balance ?? "0");
+            }
+            continue;
+        }
+
+        if (record.asset_type === asset.type
+            && record.asset_code === asset.code
+            && record.asset_issuer === asset.issuer) {
+            return String(record.balance ?? "0");
+        }
+    }
+
+    return undefined;
+}
+
+function compareStellarAmounts(left: string, right: string): number {
+    const leftStroops = stellarAmountToStroops(left);
+    const rightStroops = stellarAmountToStroops(right);
+
+    if (leftStroops === rightStroops) {
+        return 0;
+    }
+
+    return leftStroops > rightStroops ? 1 : -1;
+}
+
+function stellarAmountToStroops(amount: string): bigint {
+    const [whole = "0", fraction = ""] = amount.split(".");
+    return BigInt(whole.replace(/^0+(?=\d)/, "") || "0") * 10_000_000n
+        + BigInt(fraction.padEnd(7, "0").slice(0, 7));
+}
+
+class PaymentPrepareError extends Error {
+    constructor(
+        readonly code: "source_asset_missing" | "source_insufficient_balance" | "destination_trustline_missing",
+        message: string,
+    ) {
+        super(message);
+    }
 }

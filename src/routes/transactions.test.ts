@@ -11,10 +11,11 @@ const claimTransactionForSubmissionById = vi.fn();
 const findTransactionByHash = vi.fn();
 const findTransactionById = vi.fn();
 const findTransactionByIdempotencyKey = vi.fn();
-const prepareNativePayment = vi.fn();
-const parsePreparedNativePayment = vi.fn();
-const parseSignedNativePayment = vi.fn();
-const submitSignedNativePayment = vi.fn();
+const getAccount = vi.fn();
+const preparePayment = vi.fn();
+const parsePreparedPayment = vi.fn();
+const parseSignedPayment = vi.fn();
+const submitSignedPayment = vi.fn();
 
 vi.mock("../services/transaction-service.js", () => ({
   createPaymentTransaction,
@@ -31,10 +32,11 @@ vi.mock("../db/transaction-repository.js", () => ({
 }));
 
 vi.mock("../services/stellar.js", () => ({
-  prepareNativePayment,
-  parsePreparedNativePayment,
-  parseSignedNativePayment,
-  submitSignedNativePayment,
+  getAccount,
+  preparePayment,
+  parsePreparedPayment,
+  parseSignedPayment,
+  submitSignedPayment,
 }));
 
 const { transactionRoutes } = await import("./transactions.js");
@@ -42,6 +44,7 @@ const { transactionRoutes } = await import("./transactions.js");
 describe("POST /tx/prepare", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    getAccount.mockResolvedValue(accountWithBalances([nativeBalance()]));
   });
 
   it("prepares an unsigned native payment transaction and creates a transaction record", async () => {
@@ -50,7 +53,7 @@ describe("POST /tx/prepare", () => {
       destinationAccount: stellarKey("B"),
       preparedXdr: "unsigned-envelope-xdr",
     });
-    prepareNativePayment.mockResolvedValue("unsigned-envelope-xdr");
+    preparePayment.mockResolvedValue("unsigned-envelope-xdr");
     createPaymentTransaction.mockResolvedValue({
       transaction: createdTransaction,
       idempotentReplay: false,
@@ -64,10 +67,11 @@ describe("POST /tx/prepare", () => {
     });
 
     expect(response.statusCode).toBe(201);
-    expect(prepareNativePayment).toHaveBeenCalledWith({
+    expect(preparePayment).toHaveBeenCalledWith({
       sourceAccount: stellarKey("A"),
       destination: stellarKey("B"),
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
     expect(createPaymentTransaction).toHaveBeenCalledWith({
@@ -109,7 +113,7 @@ describe("POST /tx/prepare", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(prepareNativePayment).not.toHaveBeenCalled();
+    expect(preparePayment).not.toHaveBeenCalled();
     expect(createPaymentTransaction).not.toHaveBeenCalled();
     expect(response.json()).toMatchObject({
       idempotent_replay: true,
@@ -138,7 +142,7 @@ describe("POST /tx/prepare", () => {
     });
 
     expect(response.statusCode).toBe(409);
-    expect(prepareNativePayment).not.toHaveBeenCalled();
+    expect(preparePayment).not.toHaveBeenCalled();
     expect(createPaymentTransaction).not.toHaveBeenCalled();
     expect(response.json()).toMatchObject({
       error: "idempotency_conflict",
@@ -164,32 +168,118 @@ describe("POST /tx/prepare", () => {
     expect(response.json()).toMatchObject({
       error: "validation_error",
     });
-    expect(prepareNativePayment).not.toHaveBeenCalled();
+    expect(preparePayment).not.toHaveBeenCalled();
     expect(createPaymentTransaction).not.toHaveBeenCalled();
 
     await app.close();
   });
 
-  it("rejects issued assets for prepare", async () => {
+  it("prepares an issued asset when source holds it and destination has a trustline", async () => {
+    const asset = {
+      type: "credit_alphanum4" as const,
+      code: "USDC",
+      issuer: stellarKey("I"),
+    };
+    const createdTransaction = makeTransaction({
+      sourceAccount: stellarKey("A"),
+      destinationAccount: stellarKey("B"),
+      assetType: "credit_alphanum4",
+      assetCode: "USDC",
+      assetIssuer: stellarKey("I"),
+      preparedXdr: "unsigned-issued-envelope-xdr",
+    });
+    getAccount
+      .mockResolvedValueOnce(accountWithBalances([nativeBalance(), balanceForAsset(asset)]))
+      .mockResolvedValueOnce(accountWithBalances([nativeBalance(), balanceForAsset(asset)]));
+    preparePayment.mockResolvedValue("unsigned-issued-envelope-xdr");
+    createPaymentTransaction.mockResolvedValue({
+      transaction: createdTransaction,
+      idempotentReplay: false,
+    });
+
     const app = await buildTestApp();
     const response = await app.inject({
       method: "POST",
       url: "/tx/prepare",
       payload: {
         ...preparePayload(),
-        asset: {
-          type: "credit_alphanum4",
-          code: "USDC",
-          issuer: stellarKey("I"),
-        },
+        asset,
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(preparePayment).toHaveBeenCalledWith({
+      sourceAccount: stellarKey("A"),
+      destination: stellarKey("B"),
+      amount: "1.0000000",
+      asset,
+      memo: "demo",
+    });
+    expect(createPaymentTransaction).toHaveBeenCalledWith({
+      idempotencyKey: "payment-001",
+      sourceAccount: stellarKey("A"),
+      destinationAccount: stellarKey("B"),
+      amount: "1.0000000",
+      asset,
+      memo: "demo",
+      preparedXdr: "unsigned-issued-envelope-xdr",
+    });
+
+    await app.close();
+  });
+
+  it("rejects issued assets missing from source balances", async () => {
+    const asset = {
+      type: "credit_alphanum4" as const,
+      code: "USDC",
+      issuer: stellarKey("I"),
+    };
+    getAccount.mockResolvedValue(accountWithBalances([nativeBalance()]));
+
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/tx/prepare",
+      payload: {
+        ...preparePayload(),
+        asset,
       },
     });
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({
-      error: "unsupported_asset",
+      error: "source_asset_missing",
     });
-    expect(prepareNativePayment).not.toHaveBeenCalled();
+    expect(preparePayment).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it("rejects issued assets when the destination trustline is missing", async () => {
+    const asset = {
+      type: "credit_alphanum4" as const,
+      code: "USDC",
+      issuer: stellarKey("I"),
+    };
+    getAccount
+      .mockResolvedValueOnce(accountWithBalances([nativeBalance(), balanceForAsset(asset)]))
+      .mockResolvedValueOnce(accountWithBalances([nativeBalance()]));
+
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/tx/prepare",
+      payload: {
+        ...preparePayload(),
+        asset,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: "destination_trustline_missing",
+    });
+    expect(preparePayment).not.toHaveBeenCalled();
 
     await app.close();
   });
@@ -214,27 +304,29 @@ describe("POST /tx/submit", () => {
 
     findTransactionByHash.mockResolvedValue(undefined);
     findTransactionById.mockResolvedValue(createdTransaction);
-    parsePreparedNativePayment.mockReturnValue({
+    parsePreparedPayment.mockReturnValue({
       transaction: { id: "prepared-transaction" },
       hash: submittedTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: submittedTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
     claimTransactionForSubmissionById.mockResolvedValue({
       ...createdTransaction,
       status: "submitting",
     });
-    submitSignedNativePayment.mockResolvedValue({
+    submitSignedPayment.mockResolvedValue({
       sourceAccount: "GSOURCEACCOUNT",
       hash: submittedTransaction.txHash,
       envelopeXdr: "envelope-xdr",
@@ -252,11 +344,11 @@ describe("POST /tx/submit", () => {
     expect(response.statusCode).toBe(201);
     expect(findTransactionById).toHaveBeenCalledWith(createdTransaction.id);
     expect(findTransactionByHash).toHaveBeenCalledWith(submittedTransaction.txHash);
-    expect(parseSignedNativePayment).toHaveBeenCalledWith("signed-xdr");
-    expect(parsePreparedNativePayment).toHaveBeenCalledWith("unsigned-xdr");
+    expect(parseSignedPayment).toHaveBeenCalledWith("signed-xdr");
+    expect(parsePreparedPayment).toHaveBeenCalledWith("unsigned-xdr");
     expect(createPaymentTransaction).not.toHaveBeenCalled();
     expect(claimTransactionForSubmissionById).toHaveBeenCalledWith(createdTransaction.id);
-    expect(submitSignedNativePayment).toHaveBeenCalledWith({ id: "built-transaction" });
+    expect(submitSignedPayment).toHaveBeenCalledWith({ id: "built-transaction" });
     expect(markTransactionSubmitted).toHaveBeenCalledWith(createdTransaction.id, {
       txHash: submittedTransaction.txHash,
       envelopeXdr: "envelope-xdr",
@@ -290,27 +382,29 @@ describe("POST /tx/submit", () => {
 
     findTransactionById.mockResolvedValue(createdTransaction);
     findTransactionByHash.mockResolvedValue(undefined);
-    parsePreparedNativePayment.mockReturnValue({
+    parsePreparedPayment.mockReturnValue({
       transaction: { id: "prepared-transaction" },
       hash: submittedTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "50.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: submittedTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "50.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
     claimTransactionForSubmissionById.mockResolvedValue({
       ...createdTransaction,
       status: "submitting",
     });
-    submitSignedNativePayment.mockResolvedValue({
+    submitSignedPayment.mockResolvedValue({
       sourceAccount: "GSOURCEACCOUNT",
       hash: submittedTransaction.txHash,
       envelopeXdr: "envelope-xdr",
@@ -326,19 +420,20 @@ describe("POST /tx/submit", () => {
     });
 
     expect(response.statusCode).toBe(201);
-    expect(submitSignedNativePayment).toHaveBeenCalledWith({ id: "built-transaction" });
+    expect(submitSignedPayment).toHaveBeenCalledWith({ id: "built-transaction" });
 
     await app.close();
   });
 
   it("rejects a submit for a missing transaction", async () => {
     findTransactionById.mockResolvedValue(undefined);
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: "b".repeat(64),
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
 
@@ -351,7 +446,7 @@ describe("POST /tx/submit", () => {
 
     expect(response.statusCode).toBe(404);
     expect(createPaymentTransaction).not.toHaveBeenCalled();
-    expect(submitSignedNativePayment).not.toHaveBeenCalled();
+    expect(submitSignedPayment).not.toHaveBeenCalled();
 
     await app.close();
   });
@@ -365,12 +460,13 @@ describe("POST /tx/submit", () => {
     });
 
     findTransactionById.mockResolvedValue(existingTransaction);
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: existingTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
 
@@ -390,7 +486,7 @@ describe("POST /tx/submit", () => {
       },
     });
     expect(createPaymentTransaction).not.toHaveBeenCalled();
-    expect(submitSignedNativePayment).not.toHaveBeenCalled();
+    expect(submitSignedPayment).not.toHaveBeenCalled();
     expect(markTransactionSubmitted).not.toHaveBeenCalled();
     expect(markTransactionFailed).not.toHaveBeenCalled();
 
@@ -404,20 +500,22 @@ describe("POST /tx/submit", () => {
     });
 
     findTransactionById.mockResolvedValue(existingTransaction);
-    parsePreparedNativePayment.mockReturnValue({
+    parsePreparedPayment.mockReturnValue({
       transaction: { id: "prepared-transaction" },
       hash: "b".repeat(64),
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: "c".repeat(64),
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
 
@@ -430,8 +528,58 @@ describe("POST /tx/submit", () => {
 
     expect(response.statusCode).toBe(409);
     expect(createPaymentTransaction).not.toHaveBeenCalled();
-    expect(submitSignedNativePayment).not.toHaveBeenCalled();
+    expect(submitSignedPayment).not.toHaveBeenCalled();
     expect(markTransactionSubmitted).not.toHaveBeenCalled();
+    expect(response.json()).toMatchObject({
+      error: "transaction_mismatch",
+    });
+
+    await app.close();
+  });
+
+  it("rejects a signed transaction whose asset does not match the stored payment", async () => {
+    const issuedAsset = {
+      type: "credit_alphanum4" as const,
+      code: "USDC",
+      issuer: stellarKey("I"),
+    };
+    const existingTransaction = makeTransaction({
+      status: "created",
+      assetType: "credit_alphanum4",
+      assetCode: "USDC",
+      assetIssuer: stellarKey("I"),
+      preparedXdr: "unsigned-xdr",
+    });
+
+    findTransactionById.mockResolvedValue(existingTransaction);
+    parsePreparedPayment.mockReturnValue({
+      transaction: { id: "prepared-transaction" },
+      hash: "b".repeat(64),
+      sourceAccount: "GSOURCEACCOUNT",
+      destination: "GDESTINATION",
+      amount: "1.0000000",
+      asset: issuedAsset,
+      memo: "demo",
+    });
+    parseSignedPayment.mockReturnValue({
+      transaction: { id: "built-transaction" },
+      hash: "b".repeat(64),
+      sourceAccount: "GSOURCEACCOUNT",
+      destination: "GDESTINATION",
+      amount: "1.0000000",
+      asset: { type: "native" },
+      memo: "demo",
+    });
+
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/tx/submit",
+      payload: paymentPayload(),
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(submitSignedPayment).not.toHaveBeenCalled();
     expect(response.json()).toMatchObject({
       error: "transaction_mismatch",
     });
@@ -452,20 +600,22 @@ describe("POST /tx/submit", () => {
 
     findTransactionById.mockResolvedValue(createdTransaction);
     findTransactionByHash.mockResolvedValue(conflictingTransaction);
-    parsePreparedNativePayment.mockReturnValue({
+    parsePreparedPayment.mockReturnValue({
       transaction: { id: "prepared-transaction" },
       hash: conflictingTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
-    parseSignedNativePayment.mockReturnValue({
+    parseSignedPayment.mockReturnValue({
       transaction: { id: "built-transaction" },
       hash: conflictingTransaction.txHash,
       sourceAccount: "GSOURCEACCOUNT",
       destination: "GDESTINATION",
       amount: "1.0000000",
+      asset: { type: "native" },
       memo: "demo",
     });
 
@@ -478,7 +628,7 @@ describe("POST /tx/submit", () => {
 
     expect(response.statusCode).toBe(409);
     expect(claimTransactionForSubmissionById).not.toHaveBeenCalled();
-    expect(submitSignedNativePayment).not.toHaveBeenCalled();
+    expect(submitSignedPayment).not.toHaveBeenCalled();
     expect(response.json()).toMatchObject({
       error: "idempotency_conflict",
     });
@@ -583,6 +733,26 @@ function preparePayload() {
 
 function stellarKey(char: string) {
   return `G${char.repeat(55)}`;
+}
+
+function accountWithBalances(balances: Array<Record<string, unknown>>) {
+  return { balances };
+}
+
+function nativeBalance() {
+  return {
+    asset_type: "native",
+    balance: "100.0000000",
+  };
+}
+
+function balanceForAsset(asset: { type: string; code: string; issuer: string }) {
+  return {
+    asset_type: asset.type,
+    asset_code: asset.code,
+    asset_issuer: asset.issuer,
+    balance: "100.0000000",
+  };
 }
 
 function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {

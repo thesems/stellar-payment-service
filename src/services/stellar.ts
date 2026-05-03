@@ -3,23 +3,33 @@ import type { Transaction as StellarTransaction } from "@stellar/stellar-sdk";
 
 import { config } from "../config/env.js";
 
-type PrepareNativePaymentInput = {
+export type PaymentAsset =
+    | { type: "native" }
+    | {
+        type: "credit_alphanum4" | "credit_alphanum12";
+        code: string;
+        issuer: string;
+    };
+
+type PreparePaymentInput = {
     sourceAccount: string;
     destination: string;
     amount: string;
+    asset: PaymentAsset;
     memo?: string | undefined;
 }
 
-export type ParsedSignedNativePayment = {
+export type ParsedSignedPayment = {
     transaction: StellarTransaction;
     hash: string;
     sourceAccount: string;
     destination: string;
     amount: string;
+    asset: PaymentAsset;
     memo?: string | undefined;
 };
 
-export type ParsedNativePayment = ParsedSignedNativePayment;
+export type ParsedPayment = ParsedSignedPayment;
 
 type SubmittedStellarTransaction = {
     sourceAccount: string;
@@ -28,7 +38,7 @@ type SubmittedStellarTransaction = {
     envelopeXdr: string;
 };
 
-export async function prepareNativePayment(input: PrepareNativePaymentInput): Promise<string> {
+export async function preparePayment(input: PreparePaymentInput): Promise<string> {
     const server = new Horizon.Server(config.stellarHorizonUrl);
     const account = await server.loadAccount(input.sourceAccount);
 
@@ -38,7 +48,7 @@ export async function prepareNativePayment(input: PrepareNativePaymentInput): Pr
     });
     builder.addOperation(Operation.payment({
         amount: input.amount,
-        asset: Asset.native(),
+        asset: toStellarAsset(input.asset),
         destination: input.destination,
     }));
 
@@ -49,21 +59,21 @@ export async function prepareNativePayment(input: PrepareNativePaymentInput): Pr
     return builder.setTimeout(300).build().toEnvelope().toXDR("base64");
 }
 
-export function parseSignedNativePayment(signedTransaction: string): ParsedSignedNativePayment {
-    return parseNativePaymentTransaction(signedTransaction, { requireSignature: true });
+export function parseSignedPayment(signedTransaction: string): ParsedSignedPayment {
+    return parsePaymentTransaction(signedTransaction, { requireSignature: true });
 }
 
-export function parsePreparedNativePayment(preparedTransaction: string): ParsedNativePayment {
-    return parseNativePaymentTransaction(preparedTransaction, { requireSignature: false });
+export function parsePreparedPayment(preparedTransaction: string): ParsedPayment {
+    return parsePaymentTransaction(preparedTransaction, { requireSignature: false });
 }
 
-function parseNativePaymentTransaction(
+function parsePaymentTransaction(
     envelopeXdr: string,
     options: { requireSignature: boolean },
-): ParsedNativePayment {
+): ParsedPayment {
     const transaction = TransactionBuilder.fromXDR(envelopeXdr, config.stellarNetworkPassphrase);
     if (transaction instanceof FeeBumpTransaction) {
-        throw new Error("Only native payment transactions are supported.");
+        throw new Error("Only single-operation payment transactions are supported.");
     }
 
     if (options.requireSignature && transaction.signatures.length === 0) {
@@ -71,20 +81,16 @@ function parseNativePaymentTransaction(
     }
 
     if (transaction.operations.length !== 1) {
-        throw new Error("Only single-operation native payment transactions are supported.");
+        throw new Error("Only single-operation payment transactions are supported.");
     }
 
     const operation = transaction.operations[0];
     if (!operation) {
-        throw new Error("Only single-operation native payment transactions are supported.");
+        throw new Error("Only single-operation payment transactions are supported.");
     }
 
     if (operation.type !== "payment") {
-        throw new Error("Only native payment transactions are supported.");
-    }
-
-    if (!operation.asset.isNative()) {
-        throw new Error("Only native payment transactions are supported.");
+        throw new Error("Only payment transactions are supported.");
     }
 
     const memo = transaction.memo.type === "text"
@@ -97,11 +103,12 @@ function parseNativePaymentTransaction(
         sourceAccount: transaction.source,
         destination: operation.destination,
         amount: operation.amount,
+        asset: fromStellarAsset(operation.asset),
         memo,
     };
 }
 
-export async function submitSignedNativePayment(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
+export async function submitSignedPayment(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
     const server = new Horizon.Server(config.stellarHorizonUrl);
     const resp = await server.submitTransaction(transaction);
     return {
@@ -120,4 +127,25 @@ export async function getAccount(publicKey: string): Promise<Horizon.AccountResp
 export async function getTransactionByHash(txHash: string): Promise<Horizon.ServerApi.TransactionRecord> {
     const server = new Horizon.Server(config.stellarHorizonUrl);
     return server.transactions().transaction(txHash).call();
+}
+
+function toStellarAsset(asset: PaymentAsset): Asset {
+    if (asset.type === "native") {
+        return Asset.native();
+    }
+
+    return new Asset(asset.code, asset.issuer);
+}
+
+function fromStellarAsset(asset: Asset): PaymentAsset {
+    if (asset.isNative()) {
+        return { type: "native" };
+    }
+
+    const code = asset.getCode();
+    return {
+        type: code.length <= 4 ? "credit_alphanum4" : "credit_alphanum12",
+        code,
+        issuer: asset.getIssuer(),
+    };
 }
