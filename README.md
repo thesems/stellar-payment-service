@@ -2,9 +2,9 @@
 
 Backend service for constructing, submitting, and tracking Stellar testnet transactions.
 
-The project demonstrates practical Stellar backend integration: transaction construction with `@stellar/stellar-sdk`, Horizon submission and reads, idempotent payment requests, durable transaction state, and asynchronous lifecycle tracking.
+The project demonstrates practical Stellar backend integration: transaction construction with `@stellar/stellar-sdk`, Stellar RPC submission and tracking, Horizon account reads, idempotent payment requests, durable transaction state, and asynchronous lifecycle tracking.
 
-This is a testnet learning project built around a non-custodial wallet signing flow. The browser UI uses Freighter to sign transactions and the backend submits them to Horizon.
+This is a testnet learning project built around a non-custodial wallet signing flow. The browser UI uses Freighter to sign transactions and the backend submits them through Stellar RPC.
 
 It also serves a small browser UI from the same Fastify process. The frontend is a React app in [`web/`](./web), built with Vite, and is available at the service root after a frontend build.
 
@@ -14,8 +14,9 @@ It also serves a small browser UI from the same Fastify process. The frontend is
 - Idempotency via unique `idempotency_key` during transaction creation.
 - Persistent transaction state in Postgres.
 - Transaction lookup by internal UUID or Stellar hash.
-- Horizon account lookup for balances and sequence.
-- Horizon error parsing for common result codes such as `op_underfunded` and `op_no_destination`.
+- Stellar RPC account sequence lookup, transaction submission, and transaction tracking.
+- Horizon account lookup for balance display.
+- Stellar error parsing for common result codes such as `op_underfunded` and `op_no_destination`.
 - Single polling worker for `submitted -> confirmed` tracking.
 - React/Vite browser UI support for a Freighter wallet-based submit flow.
 - Vitest coverage for the `/tx/prepare` and `/tx/submit` flows.
@@ -26,15 +27,16 @@ It also serves a small browser UI from the same Fastify process. The frontend is
 Fastify API
   -> Drizzle/Postgres
   -> Stellar SDK
-  -> Horizon testnet
+  -> Stellar RPC testnet for sequence lookup and submission
+  -> Horizon testnet for balance reads
 
 Worker
   -> submitted transactions
-  -> Horizon transaction lookup
+  -> Stellar RPC transaction lookup
   -> confirmed/failed update
 ```
 
-The API owns validation, idempotency, transaction building, and submission. Wallets own signing. The worker polls Horizon to move submitted transactions into confirmed or failed states.
+The API owns validation, idempotency, transaction building, and submission. Wallets own signing. The worker polls Stellar RPC to move submitted transactions into confirmed or failed states.
 
 ## API
 
@@ -173,6 +175,6 @@ STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 
 ## Scope
 
-Implemented: testnet XLM and classic issued-asset payment preparation, wallet-based submission, idempotent submission, Horizon reads, persisted lifecycle state, polling confirmation worker, React/Vite browser UI, basic tests.
+Implemented: testnet XLM and classic issued-asset payment preparation, wallet-based submission through Stellar RPC, idempotent submission, Horizon balance reads, persisted lifecycle state, polling confirmation worker, React/Vite browser UI, basic tests.
 
 Not implemented: mainnet, authentication, production custody, Soroban calls.

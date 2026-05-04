@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
 import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
-import { parseHorizonError } from "../services/horizon-error-parser.js";
+import { parseStellarError } from "../services/stellar-error-parser.js";
 import { getAccount, parsePreparedPayment, parseSignedPayment, preparePayment, submitSignedPayment, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
 import { config } from "../config/env.js";
 
@@ -363,7 +363,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
                 transactionId: parsed.data.transaction_id,
                 txHash: signedPayment.hash,
             }, "transaction submission failed");
-            const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseHorizonError(err));
+            const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseStellarError(err));
             return reply.status(400).send({
                 idempotent_replay: false,
                 transaction: serializeTransaction(responseTransaction ?? claimedTransaction),

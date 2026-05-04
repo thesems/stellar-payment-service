@@ -5,27 +5,35 @@ import {
   markSubmittedTransactionFailed,
 } from "../db/transaction-repository.js";
 import type { Transaction } from "../db/schema.js";
-import { parseHorizonError } from "../services/horizon-error-parser.js";
+import { parseStellarError } from "../services/stellar-error-parser.js";
 import { getTransactionByHash } from "../services/stellar.js";
 
-let shuttingDown = false;
+const shutdownController = new AbortController();
+let shutdownSignalCount = 0;
 
 async function main(): Promise<void> {
+  const { signal } = shutdownController;
+
   console.log("transaction tracker started", {
     pollIntervalMs: config.workerPollIntervalMs,
     submittedTimeoutMinutes: config.workerSubmittedTimeoutMinutes,
   });
 
-  while (!shuttingDown) {
-    await pollOnce();
-    await sleep(config.workerPollIntervalMs);
+  while (!signal.aborted) {
+    await pollOnce(signal);
+    if (!signal.aborted) {
+      await sleep(config.workerPollIntervalMs, signal);
+    }
   }
+
+  console.log("transaction tracker stopped");
 }
 
-async function pollOnce(): Promise<void> {
+async function pollOnce(signal: AbortSignal): Promise<void> {
   const transactions = await findSubmittedTransactions();
 
   for (const transaction of transactions) {
+    if (signal.aborted) return;
     await trackTransaction(transaction);
   }
 }
@@ -36,7 +44,7 @@ async function trackTransaction(transaction: Transaction): Promise<void> {
   if (isTimedOut(transaction)) {
     await markSubmittedTransactionFailed(transaction.id, {
       errorCode: "tracking_timeout",
-      errorMessage: "Transaction stayed submitted too long without Horizon confirmation.",
+      errorMessage: "Transaction stayed submitted too long without Stellar RPC confirmation.",
     });
     console.warn("transaction tracking timed out", {
       id: transaction.id,
@@ -46,9 +54,13 @@ async function trackTransaction(transaction: Transaction): Promise<void> {
   }
 
   try {
-    const horizonTransaction = await getTransactionByHash(transaction.txHash);
+    const stellarTransaction = await getTransactionByHash(transaction.txHash);
 
-    if (horizonTransaction.successful) {
+    if (stellarTransaction.status === "NOT_FOUND") {
+      return;
+    }
+
+    if (stellarTransaction.status === "SUCCESS") {
       const confirmed = await markSubmittedTransactionConfirmed(transaction.id);
       if (confirmed) {
         console.log("transaction confirmed", {
@@ -61,19 +73,15 @@ async function trackTransaction(transaction: Transaction): Promise<void> {
 
     await markSubmittedTransactionFailed(transaction.id, {
       errorCode: "tx_failed",
-      errorMessage: "Horizon returned an unsuccessful transaction.",
-      horizonError: horizonTransaction,
+      errorMessage: "Stellar RPC returned a failed transaction.",
+      horizonError: toJsonSafe(stellarTransaction.raw),
     });
-    console.warn("transaction failed according to Horizon", {
+    console.warn("transaction failed according to Stellar RPC", {
       id: transaction.id,
       txHash: transaction.txHash,
     });
   } catch (err) {
-    if (isHorizonNotFound(err)) {
-      return;
-    }
-
-    await markSubmittedTransactionFailed(transaction.id, parseHorizonError(err));
+    await markSubmittedTransactionFailed(transaction.id, parseStellarError(err));
     console.warn("transaction tracking failed", {
       id: transaction.id,
       txHash: transaction.txHash,
@@ -88,20 +96,48 @@ function isTimedOut(transaction: Transaction): boolean {
   return Date.now() - submittedAt.getTime() > timeoutMs;
 }
 
-function isHorizonNotFound(err: unknown): boolean {
-  return (err as { response?: { status?: number } })?.response?.status === 404;
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abortSleep);
+      resolve();
+    }, ms);
+
+    const abortSleep = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+
+    signal.addEventListener("abort", abortSleep, { once: true });
+  });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function toJsonSafe(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
 }
 
-process.on("SIGINT", () => {
-  shuttingDown = true;
-});
+function requestShutdown(signal: NodeJS.Signals): void {
+  shutdownSignalCount += 1;
 
-process.on("SIGTERM", () => {
-  shuttingDown = true;
-});
+  if (shutdownSignalCount === 1) {
+    console.log("transaction tracker shutting down", { signal });
+    shutdownController.abort();
+    return;
+  }
+
+  console.warn("transaction tracker forced shutdown", { signal });
+  process.exit(signal === "SIGINT" ? 130 : 143);
+}
+
+process.on("SIGINT", requestShutdown);
+process.on("SIGTERM", requestShutdown);
 
 await main();

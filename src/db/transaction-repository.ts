@@ -138,7 +138,7 @@ export async function markTransactionSubmitted(
     input: {
         txHash: string;
         envelopeXdr: string;
-        resultXdr: string;
+        resultXdr: string | null;
     },
 ): Promise<Transaction> {
     const rows = await db
@@ -167,7 +167,7 @@ export async function markSubmittingTransactionSubmitted(
     input: {
         txHash: string;
         envelopeXdr: string;
-        resultXdr: string;
+        resultXdr: string | null;
     },
 ): Promise<Transaction | undefined> {
     const rows = await db

@@ -1,7 +1,8 @@
-import { Asset, BASE_FEE, FeeBumpTransaction, Horizon, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Asset, BASE_FEE, FeeBumpTransaction, Horizon, Memo, Operation, TransactionBuilder, rpc } from "@stellar/stellar-sdk";
 import type { Transaction as StellarTransaction } from "@stellar/stellar-sdk";
 
 import { config } from "../config/env.js";
+import { RpcTransactionError } from "./stellar-error-parser.js";
 
 export type PaymentAsset =
     | { type: "native" }
@@ -34,13 +35,18 @@ export type ParsedPayment = ParsedSignedPayment;
 type SubmittedStellarTransaction = {
     sourceAccount: string;
     hash: string;
-    resultXdr: string;
+    resultXdr: string | null;
     envelopeXdr: string;
 };
 
+export type StellarTransactionLookup =
+    | { status: "SUCCESS"; raw: rpc.Api.RawGetTransactionResponse }
+    | { status: "FAILED"; raw: rpc.Api.RawGetTransactionResponse }
+    | { status: "NOT_FOUND"; raw: rpc.Api.RawGetTransactionResponse };
+
 export async function preparePayment(input: PreparePaymentInput): Promise<string> {
-    const server = new Horizon.Server(config.stellarHorizonUrl);
-    const account = await server.loadAccount(input.sourceAccount);
+    const server = new rpc.Server(config.stellarRpcUrl);
+    const account = await server.getAccount(input.sourceAccount);
 
     const builder = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -109,13 +115,36 @@ function parsePaymentTransaction(
 }
 
 export async function submitSignedPayment(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
-    const server = new Horizon.Server(config.stellarHorizonUrl);
-    const resp = await server.submitTransaction(transaction);
+    const server = new rpc.Server(config.stellarRpcUrl);
+    const resp = await server.sendTransaction(transaction);
+
+    if (resp.status === "ERROR") {
+        throw new RpcTransactionError(
+            "tx_rejected",
+            "RPC rejected the transaction before ledger inclusion.",
+            {
+                status: resp.status,
+                hash: resp.hash,
+                latestLedger: resp.latestLedger,
+                errorResultXdr: resp.errorResult?.toXDR("base64"),
+                diagnosticEventsXdr: resp.diagnosticEvents?.map((event) => event.toXDR("base64")),
+            },
+        );
+    }
+
+    if (resp.status === "TRY_AGAIN_LATER") {
+        throw new RpcTransactionError(
+            "try_again_later",
+            "RPC could not accept the transaction yet. Try again later.",
+            resp,
+        );
+    }
+
     return {
         sourceAccount: transaction.source,
         hash: resp.hash,
-        resultXdr: resp.result_xdr,
-        envelopeXdr: resp.envelope_xdr,
+        resultXdr: null,
+        envelopeXdr: transaction.toEnvelope().toXDR("base64"),
     }
 }
 
@@ -124,9 +153,19 @@ export async function getAccount(publicKey: string): Promise<Horizon.AccountResp
     return server.loadAccount(publicKey);
 }
 
-export async function getTransactionByHash(txHash: string): Promise<Horizon.ServerApi.TransactionRecord> {
-    const server = new Horizon.Server(config.stellarHorizonUrl);
-    return server.transactions().transaction(txHash).call();
+export async function getTransactionByHash(txHash: string): Promise<StellarTransactionLookup> {
+    const server = new rpc.Server(config.stellarRpcUrl);
+    const resp = await server._getTransaction(txHash);
+
+    if (resp.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+        return { status: "SUCCESS", raw: resp };
+    }
+
+    if (resp.status === rpc.Api.GetTransactionStatus.FAILED) {
+        return { status: "FAILED", raw: resp };
+    }
+
+    return { status: "NOT_FOUND", raw: resp };
 }
 
 function toStellarAsset(asset: PaymentAsset): Asset {
