@@ -29,6 +29,13 @@
       "when": 1777733545000,
       "tag": "0003_unify_stellar_transactions",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778169600000,
+      "tag": "0004_generalize_transactions_for_protocols",
+      "breakpoints": true
     }
   ]
 }

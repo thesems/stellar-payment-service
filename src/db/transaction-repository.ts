@@ -99,6 +99,7 @@ export async function findSubmittedTransactions(): Promise<Transaction[]> {
         .select()
         .from(transactions)
         .where(and(
+            eq(transactions.protocol, "stellar"),
             eq(transactions.status, "submitted"),
             isNotNull(transactions.txHash),
         ))
@@ -116,6 +117,8 @@ export async function listTransactions(input: {
         conditions.push(or(
             eq(transactions.sourceAccount, input.account),
             eq(transactions.destinationAccount, input.account),
+            eq(transactions.sourceAddress, input.account),
+            eq(transactions.destinationAddress, input.account),
         ));
     }
 
@@ -146,7 +149,9 @@ export async function markTransactionSubmitted(
         .set({
             status: "submitted",
             txHash: input.txHash,
+            submittedPayload: input.envelopeXdr,
             envelopeXdr: input.envelopeXdr,
+            resultPayload: input.resultXdr,
             resultXdr: input.resultXdr,
             submittedAt: new Date(),
             updatedAt: new Date(),
@@ -175,7 +180,9 @@ export async function markSubmittingTransactionSubmitted(
         .set({
             status: "submitted",
             txHash: input.txHash,
+            submittedPayload: input.envelopeXdr,
             envelopeXdr: input.envelopeXdr,
+            resultPayload: input.resultXdr,
             resultXdr: input.resultXdr,
             submittedAt: new Date(),
             updatedAt: new Date(),
@@ -203,6 +210,7 @@ export async function markTransactionFailed(
             status: "failed",
             errorCode: input.errorCode,
             errorMessage: input.errorMessage,
+            providerError: input.horizonError ?? null,
             horizonError: input.horizonError ?? null,
             failedAt: new Date(),
             updatedAt: new Date(),
@@ -249,6 +257,7 @@ export async function markSubmittedTransactionFailed(
             status: "failed",
             errorCode: input.errorCode,
             errorMessage: input.errorMessage,
+            providerError: input.horizonError ?? null,
             horizonError: input.horizonError ?? null,
             failedAt: new Date(),
             updatedAt: new Date(),

@@ -62,13 +62,13 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
                   </CopyCell>
                 </td>
                 <td className="mono">
-                  <CopyCell value={row.source_account} label="source account">
-                    <span>{shortenAddress(row.source_account)}</span>
+                  <CopyCell value={row.source_address ?? row.source_account} label="source address">
+                    <span>{shortenAddress(row.source_address ?? row.source_account)}</span>
                   </CopyCell>
                 </td>
                 <td className="mono">
-                  <CopyCell value={row.destination_account} label="destination account">
-                    <span>{shortenAddress(row.destination_account) || "—"}</span>
+                  <CopyCell value={row.destination_address ?? row.destination_account} label="destination address">
+                    <span>{shortenAddress(row.destination_address ?? row.destination_account) || "—"}</span>
                   </CopyCell>
                 </td>
                 <td>
@@ -83,7 +83,7 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
                   </CopyCell>
                 </td>
                 <td className="mono">
-                  <TransactionHashLink hash={row.tx_hash} />
+                  <TransactionHashLink hash={row.tx_hash} protocol={row.protocol} network={row.network} />
                 </td>
                 <td>
                   {row.status === "created" ? (
@@ -108,14 +108,20 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
   );
 }
 
-function TransactionHashLink({ hash }) {
+function TransactionHashLink({ hash, protocol, network }) {
   const txHash = normalizeCopyValue(hash);
 
   if (!txHash) {
     return <span className="tx-token tx-token--empty">—</span>;
   }
 
-  const explorerUrl = `https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(txHash)}`;
+  const explorerUrl = protocol === "stellar"
+    ? `https://stellar.expert/explorer/${encodeURIComponent(network ?? "testnet")}/tx/${encodeURIComponent(txHash)}`
+    : null;
+
+  if (!explorerUrl) {
+    return <span className="tx-token">{shortenHash(txHash, 12, 8)}</span>;
+  }
 
   return (
     <a

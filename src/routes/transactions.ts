@@ -293,6 +293,11 @@ export function serializeTransaction(transaction: Transaction) {
         idempotency_key: transaction.idempotencyKey,
         kind: transaction.kind,
         status: transaction.status,
+        protocol: transaction.protocol,
+        network: transaction.network,
+        chain_id: transaction.chainId,
+        source_address: transaction.sourceAddress,
+        destination_address: transaction.destinationAddress,
         source_account: transaction.sourceAccount,
         destination_account: transaction.destinationAccount,
         amount: transaction.amount,
@@ -300,8 +305,11 @@ export function serializeTransaction(transaction: Transaction) {
         memo: transaction.memo,
         intent: transaction.intent,
         prepared_transaction: transaction.status === "created" ? transaction.preparedXdr : null,
+        prepared_payload: transaction.status === "created" ? transaction.preparedPayload : null,
         network_passphrase: transaction.status === "created" ? config.stellarNetworkPassphrase : null,
         tx_hash: transaction.txHash,
+        submitted_payload: transaction.submittedPayload,
+        result_payload: transaction.resultPayload,
         error_code: transaction.errorCode,
         error_message: transaction.errorMessage,
         payment: paymentIntent
@@ -414,8 +422,8 @@ function readPaymentIntent(transaction: Transaction): {
         memo?: string | null;
     }> | null | undefined;
 
-    const sourceAccount = intent?.source_account ?? transaction.sourceAccount;
-    const destinationAccount = intent?.destination ?? transaction.destinationAccount ?? undefined;
+    const sourceAccount = intent?.source_account ?? transaction.sourceAccount ?? transaction.sourceAddress;
+    const destinationAccount = intent?.destination ?? transaction.destinationAccount ?? transaction.destinationAddress ?? undefined;
     const amount = intent?.amount ?? transaction.amount ?? undefined;
     const asset = intent?.asset ?? readAsset(transaction);
 

@@ -1,5 +1,6 @@
 import { createTransactionIfNew } from "../db/transaction-repository.js";
 import type { Transaction } from "../db/schema.js";
+import { config } from "../config/env.js";
 
 export type PaymentAsset =
   | { type: "native" }
@@ -62,7 +63,12 @@ export async function createStellarTransaction(
   return createTransactionIfNew({
     idempotencyKey: input.idempotencyKey,
     status: "created",
+    protocol: "stellar",
+    network: config.stellarNetwork,
+    chainId: null,
     kind: input.kind,
+    sourceAddress: input.sourceAccount,
+    destinationAddress: input.destinationAccount ?? null,
     sourceAccount: input.sourceAccount,
     destinationAccount: input.destinationAccount ?? null,
     assetType: input.asset?.type ?? null,
@@ -71,7 +77,11 @@ export async function createStellarTransaction(
     amount: input.amount ?? null,
     memo: input.memo ?? null,
     intent: input.intent,
+    preparedPayload: input.preparedXdr ?? null,
     preparedXdr: input.preparedXdr ?? null,
     txHash: input.txHash ?? null,
+    submittedPayload: null,
+    resultPayload: null,
+    providerError: null,
   });
 }
