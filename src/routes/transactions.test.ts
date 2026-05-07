@@ -757,18 +757,40 @@ function balanceForAsset(asset: { type: string; code: string; issuer: string }) 
 
 function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
   const now = new Date("2026-04-18T10:00:00.000Z");
+  const sourceAccount = overrides.sourceAccount ?? "GSOURCEACCOUNT";
+  const destinationAccount = overrides.destinationAccount ?? "GDESTINATION";
+  const assetType = overrides.assetType ?? "native";
+  const assetCode = overrides.assetCode ?? null;
+  const assetIssuer = overrides.assetIssuer ?? null;
+  const amount = overrides.amount ?? "1.0000000";
+  const memo = overrides.memo ?? "demo";
+  const intent = overrides.intent ?? {
+    source_account: sourceAccount,
+    destination: destinationAccount,
+    amount,
+    asset: assetType === "native"
+      ? { type: "native" }
+      : {
+          type: assetType,
+          code: assetCode ?? "",
+          issuer: assetIssuer ?? "",
+        },
+    memo,
+  };
 
   return {
     id: "8b59b7b4-d03b-48e1-89d3-8b9ff89d2ec5",
     idempotencyKey: "payment-001",
+    kind: "payment",
     status: "created",
-    sourceAccount: "GSOURCEACCOUNT",
-    destinationAccount: "GDESTINATION",
-    assetType: "native",
-    assetCode: null,
-    assetIssuer: null,
-    amount: "1.0000000",
-    memo: "demo",
+    sourceAccount,
+    destinationAccount,
+    assetType,
+    assetCode,
+    assetIssuer,
+    amount,
+    memo,
+    intent,
     preparedXdr: null,
     txHash: null,
     envelopeXdr: null,

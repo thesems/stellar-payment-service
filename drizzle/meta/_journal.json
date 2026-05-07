@@ -22,6 +22,13 @@
       "when": 1777733544000,
       "tag": "0002_add_prepared_transaction_xdr",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1777733545000,
+      "tag": "0003_unify_stellar_transactions",
+      "breakpoints": true
     }
   ]
 }

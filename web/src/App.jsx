@@ -8,7 +8,7 @@ import {
 } from "@stellar/freighter-api";
 
 import { TransactionTable } from "./components/TransactionTable.jsx";
-import { Card, Field, OutputPane, TabButton } from "./components/ui.jsx";
+import { Card, Field, OutputPane, TabButton, TextareaField } from "./components/ui.jsx";
 import { formatError, prettyPrint, requestJson } from "../js/http.js";
 import { describeAsset, shortenAddress } from "./utils/formatters.js";
 import brandMarkUrl from "../favicon.svg";
@@ -21,6 +21,16 @@ const DEFAULT_CREATE_TRANSACTION = {
   memo: "",
   idempotency_key: "xlm-demo-001",
 };
+
+function createDefaultSwapForm() {
+  return {
+    path: "",
+    amount_in: "",
+    amount_out_min: "",
+    to: "",
+    idempotency_key: `swap-demo-${Math.floor(Date.now() / 1000)}`,
+  };
+}
 
 const DEFAULT_TRANSACTION_LIST = {
   limit: 20,
@@ -44,6 +54,9 @@ function App() {
   const [createTransactionForm, setCreateTransactionForm] = useState(DEFAULT_CREATE_TRANSACTION);
   const [createTransactionOutput, setCreateTransactionOutput] = useState("No response yet.");
   const [createTransactionModalOpen, setCreateTransactionModalOpen] = useState(false);
+  const [createSwapForm, setCreateSwapForm] = useState(() => createDefaultSwapForm());
+  const [createSwapOutput, setCreateSwapOutput] = useState("No response yet.");
+  const [createSwapModalOpen, setCreateSwapModalOpen] = useState(false);
 
   const [transactionListForm, setTransactionListForm] = useState(DEFAULT_TRANSACTION_LIST);
   const [transactionListRows, setTransactionListRows] = useState([]);
@@ -402,6 +415,94 @@ function App() {
     }
   }
 
+  async function createPreparedSwap(event) {
+    event.preventDefault();
+
+    setFreighter({
+      className: "status-checking",
+      label: "Freighter: checking",
+      hint: "Connecting and creating swap...",
+      output: "No response yet.",
+    });
+
+    try {
+      const access = await requestAccess();
+      if (access?.error) {
+        throw new Error(describeFreighterApiError(access.error));
+      }
+
+      const address = access?.address;
+      if (!address) {
+        throw new Error("Freighter did not return a public key.");
+      }
+      if (currentAccount.address && address !== currentAccount.address) {
+        throw new Error(`Freighter is connected as ${shortenAddress(address)}, but the modal is using ${shortenAddress(currentAccount.address)}. Reconnect before creating the swap.`);
+      }
+
+      const network = await readFreighterNetwork();
+      const accountState = currentAccount.address === address && currentAccount.data
+        ? currentAccount
+        : await loadCurrentAccount(address, network);
+      if (!accountState.data) {
+        throw new Error("Unable to load the connected account.");
+      }
+
+      const path = parseContractPath(createSwapForm.path);
+      const amountIn = createSwapForm.amount_in.trim();
+      const amountOutMin = createSwapForm.amount_out_min.trim();
+      const to = createSwapForm.to.trim();
+      const idempotencyKey = createSwapForm.idempotency_key.trim();
+
+      if (path.length < 2) {
+        throw new Error("Swap path must include at least two contract IDs.");
+      }
+      if (!amountIn || !amountOutMin || !to) {
+        throw new Error("Path, amounts, and recipient are required before using Freighter.");
+      }
+      if (!idempotencyKey) {
+        throw new Error("Idempotency key is required before submitting.");
+      }
+
+      const preparePayload = {
+        idempotency_key: idempotencyKey,
+        source_account: address,
+        path,
+        amount_in: amountIn,
+        amount_out_min: amountOutMin,
+        to,
+      };
+
+      const prepared = await requestJson("/swap/prepare", {
+        method: "POST",
+        body: JSON.stringify(preparePayload),
+      });
+
+      setCreateSwapOutput(prettyPrint(prepared));
+      setCreateSwapModalOpen(false);
+      setCreateSwapForm(createDefaultSwapForm());
+      await loadTransactionList({ offset: 0 });
+      await loadCurrentAccount(address, network);
+      setFreighter({
+        className: "status-ok",
+        label: "Freighter: ready",
+        hint: `Created swap with ${shortenAddress(address)}.`,
+        output: prettyPrint({
+          address,
+          prepared,
+        }),
+      });
+    } catch (error) {
+      console.error("[freighter] create swap failed", error);
+      setFreighter({
+        className: "status-error",
+        label: "Freighter: error",
+        hint: `Swap creation failed. ${describeError(error)}`,
+        output: formatError(error),
+      });
+      setCreateSwapOutput(formatError(error));
+    }
+  }
+
   async function submitCreatedTransaction(transaction) {
     setSubmittingTransactionId(transaction.id);
     setTransactionListError("");
@@ -573,9 +674,29 @@ function App() {
             >
               <div className="tx-summary">
                 <p className="hint">{transactionListSummary}</p>
-                <button className="button" type="button" onClick={() => setCreateTransactionModalOpen(true)}>
-                  Create Transaction
-                </button>
+                <div className="button-row">
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    onClick={() => {
+                      setCreateSwapForm(createDefaultSwapForm());
+                      setCreateTransactionModalOpen(false);
+                      setCreateSwapModalOpen(true);
+                    }}
+                  >
+                    Create Swap
+                  </button>
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => {
+                      setCreateSwapModalOpen(false);
+                      setCreateTransactionModalOpen(true);
+                    }}
+                  >
+                    Create Transaction
+                  </button>
+                </div>
               </div>
               <form className="form tx-controls" onSubmit={(event) => void handleTransactionList(event)}>
                 <Field
@@ -714,6 +835,75 @@ function App() {
           </section>
         </div>
       ) : null}
+
+      {createSwapModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="createSwapTitle">
+            <div className="modal-head">
+              <div>
+                <p className="card-kicker">Write</p>
+                <h2 id="createSwapTitle">Create Swap</h2>
+              </div>
+              <button className="button button-secondary" type="button" onClick={() => setCreateSwapModalOpen(false)}>
+                Close
+              </button>
+            </div>
+            <form className="form" onSubmit={(event) => void createPreparedSwap(event)}>
+              <TextareaField
+                label="Path contract IDs"
+                name="path"
+                placeholder={"CA...\nCA...\nCA..."}
+                rows={5}
+                value={createSwapForm.path}
+                onChange={(value) => setCreateSwapForm((current) => ({ ...current, path: value }))}
+              />
+              <Field
+                label="Amount in"
+                name="amount_in"
+                placeholder="10000000"
+                inputMode="numeric"
+                value={createSwapForm.amount_in}
+                onChange={(value) => setCreateSwapForm((current) => ({ ...current, amount_in: value }))}
+              />
+              <Field
+                label="Minimum amount out"
+                name="amount_out_min"
+                placeholder="9900000"
+                inputMode="numeric"
+                value={createSwapForm.amount_out_min}
+                onChange={(value) => setCreateSwapForm((current) => ({ ...current, amount_out_min: value }))}
+              />
+              <Field
+                label="Recipient"
+                name="to"
+                placeholder="G..."
+                value={createSwapForm.to}
+                onChange={(value) => setCreateSwapForm((current) => ({ ...current, to: value }))}
+              />
+              <Field
+                label="Idempotency key"
+                name="idempotency_key"
+                placeholder="swap-demo-001"
+                value={createSwapForm.idempotency_key}
+                onChange={(value) => setCreateSwapForm((current) => ({ ...current, idempotency_key: value }))}
+              />
+              <div className="hint">
+                The connected Freighter account is used as the swap source. The path must contain at least two contract IDs.
+                The backend sets the swap deadline automatically.
+              </div>
+              <div className="button-row tx-button-row">
+                <button className="button button-secondary" type="button" onClick={() => setCreateSwapModalOpen(false)}>
+                  Cancel
+                </button>
+                <button className="button" type="submit">
+                  Create Swap
+                </button>
+              </div>
+            </form>
+            <OutputPane id="createSwapOutput" value={createSwapOutput} />
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -839,6 +1029,13 @@ function assetKey(asset) {
   }
 
   return `${asset.type}:${asset.code}:${asset.issuer}`;
+}
+
+function parseContractPath(value) {
+  return String(value ?? "")
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function readWorkspaceTabFromUrl() {

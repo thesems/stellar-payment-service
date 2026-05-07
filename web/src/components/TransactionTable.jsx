@@ -26,6 +26,7 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
         <thead>
           <tr>
             <th>Status</th>
+            <th>Kind</th>
             <th>ID</th>
             <th>Source</th>
             <th>Destination</th>
@@ -38,7 +39,7 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
         <tbody>
           {emptyMessage ? (
             <tr>
-              <td className="table-empty" colSpan={8}>
+              <td className="table-empty" colSpan={9}>
                 {emptyMessage}
               </td>
             </tr>
@@ -48,6 +49,11 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
                 <td>
                   <CopyCell value={row.status} label="transaction status">
                     <span className={`table-pill status-pill ${statusClass(row.status)}`}>{row.status}</span>
+                  </CopyCell>
+                </td>
+                <td>
+                  <CopyCell value={row.kind} label="transaction kind">
+                    <span className="table-subtle">{row.kind ?? "payment"}</span>
                   </CopyCell>
                 </td>
                 <td className="mono">
@@ -62,12 +68,12 @@ export function TransactionTable({ rows, loading, filter, onSelectId, onSubmitCr
                 </td>
                 <td className="mono">
                   <CopyCell value={row.destination_account} label="destination account">
-                    <span>{shortenAddress(row.destination_account)}</span>
+                    <span>{shortenAddress(row.destination_account) || "—"}</span>
                   </CopyCell>
                 </td>
                 <td>
-                  <CopyCell value={`${row.amount} ${describeAsset(row.asset)}`.trim()} label="amount">
-                    <div>{row.amount}</div>
+                  <CopyCell value={`${row.amount ?? ""} ${describeAsset(row.asset)}`.trim()} label="amount">
+                    <div>{row.amount ?? "—"}</div>
                     <div className="table-subtle">{describeAsset(row.asset)}</div>
                   </CopyCell>
                 </td>

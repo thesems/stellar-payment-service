@@ -1,4 +1,4 @@
-import { Asset, BASE_FEE, FeeBumpTransaction, Horizon, Memo, Operation, TransactionBuilder, rpc } from "@stellar/stellar-sdk";
+import { Address, Asset, BASE_FEE, Contract, FeeBumpTransaction, Horizon, Memo, Operation, TransactionBuilder, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import type { Transaction as StellarTransaction } from "@stellar/stellar-sdk";
 
 import { config } from "../config/env.js";
@@ -31,6 +31,21 @@ export type ParsedSignedPayment = {
 };
 
 export type ParsedPayment = ParsedSignedPayment;
+
+export type SoroswapSwapIntent = {
+    routerContractId: string;
+    path: string[];
+    amountIn: string;
+    amountOutMin: string;
+    to: string;
+    deadline: number;
+};
+
+export type ParsedHostFunctionTransaction = {
+    transaction: StellarTransaction;
+    hash: string;
+    sourceAccount: string;
+};
 
 type SubmittedStellarTransaction = {
     sourceAccount: string;
@@ -65,12 +80,51 @@ export async function preparePayment(input: PreparePaymentInput): Promise<string
     return builder.setTimeout(300).build().toEnvelope().toXDR("base64");
 }
 
+export async function prepareSoroswapSwap(input: {
+    sourceAccount: string;
+    routerContractId: string;
+    path: string[];
+    amountIn: string;
+    amountOutMin: string;
+    to: string;
+    deadline: number;
+}): Promise<string> {
+    const server = new rpc.Server(config.stellarRpcUrl);
+    const account = await server.getAccount(input.sourceAccount);
+    const router = new Contract(input.routerContractId);
+
+    const builder = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: config.stellarNetworkPassphrase,
+    });
+
+    builder.addOperation(router.call(
+        "swap_exact_tokens_for_tokens",
+        nativeToScVal(BigInt(input.amountIn), { type: "i128" }),
+        nativeToScVal(BigInt(input.amountOutMin), { type: "i128" }),
+        nativeToScVal(input.path.map((value) => new Address(value))),
+        new Address(input.to).toScVal(),
+        nativeToScVal(BigInt(input.deadline), { type: "u64" }),
+    ));
+
+    const prepared = await server.prepareTransaction(builder.setTimeout(300).build());
+    return prepared.toEnvelope().toXDR("base64");
+}
+
 export function parseSignedPayment(signedTransaction: string): ParsedSignedPayment {
     return parsePaymentTransaction(signedTransaction, { requireSignature: true });
 }
 
 export function parsePreparedPayment(preparedTransaction: string): ParsedPayment {
     return parsePaymentTransaction(preparedTransaction, { requireSignature: false });
+}
+
+export function parseSignedHostFunctionTransaction(signedTransaction: string): ParsedHostFunctionTransaction {
+    return parseHostFunctionTransaction(signedTransaction, { requireSignature: true });
+}
+
+export function parsePreparedHostFunctionTransaction(preparedTransaction: string): ParsedHostFunctionTransaction {
+    return parseHostFunctionTransaction(preparedTransaction, { requireSignature: false });
 }
 
 function parsePaymentTransaction(
@@ -114,7 +168,44 @@ function parsePaymentTransaction(
     };
 }
 
+function parseHostFunctionTransaction(
+    envelopeXdr: string,
+    options: { requireSignature: boolean },
+): ParsedHostFunctionTransaction {
+    const transaction = TransactionBuilder.fromXDR(envelopeXdr, config.stellarNetworkPassphrase);
+    if (transaction instanceof FeeBumpTransaction) {
+        throw new Error("Only single-operation contract transactions are supported.");
+    }
+
+    if (options.requireSignature && transaction.signatures.length === 0) {
+        throw new Error("Signed transaction must include at least one signature.");
+    }
+
+    if (transaction.operations.length !== 1) {
+        throw new Error("Only single-operation contract transactions are supported.");
+    }
+
+    const operation = transaction.operations[0];
+    if (!operation) {
+        throw new Error("Only single-operation contract transactions are supported.");
+    }
+
+    if (operation.type !== "invokeHostFunction") {
+        throw new Error("Only contract invocation transactions are supported.");
+    }
+
+    return {
+        transaction,
+        hash: transaction.hash().toString("hex"),
+        sourceAccount: transaction.source,
+    };
+}
+
 export async function submitSignedPayment(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
+    return submitSignedTransaction(transaction);
+}
+
+export async function submitSignedTransaction(transaction: StellarTransaction): Promise<SubmittedStellarTransaction> {
     const server = new rpc.Server(config.stellarRpcUrl);
     const resp = await server.sendTransaction(transaction);
 

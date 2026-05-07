@@ -9,6 +9,7 @@ import { authRoutes } from "./routes/auth.js";
 import { accountRoutes } from "./routes/accounts.js";
 import { healthRoutes } from "./routes/health.js";
 import { transactionRoutes } from "./routes/transactions.js";
+import { swapRoutes } from "./routes/swaps.js";
 
 const app = Fastify({ loggerInstance: createLogger(config.logPretty) });
 let shuttingDown = false;
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
     await app.register(authRoutes);
     await app.register(healthRoutes);
     await app.register(transactionRoutes);
+    await app.register(swapRoutes);
 
     app.get("/*", async (request, reply) => {
       if (request.method !== "GET" && request.method !== "HEAD") {

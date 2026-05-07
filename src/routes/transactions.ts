@@ -5,7 +5,7 @@ import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
 import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
 import { parseStellarError } from "../services/stellar-error-parser.js";
-import { getAccount, parsePreparedPayment, parseSignedPayment, preparePayment, submitSignedPayment, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
+import { getAccount, parsePreparedHostFunctionTransaction, parsePreparedPayment, parseSignedHostFunctionTransaction, parseSignedPayment, preparePayment, submitSignedPayment, submitSignedTransaction, type ParsedHostFunctionTransaction, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
 import { config } from "../config/env.js";
 
 const nativeAssetSchema = z.object({
@@ -237,20 +237,6 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let signedPayment: ParsedSignedPayment;
-        try {
-            signedPayment = parseSignedPayment(parsed.data.signed_transaction);
-        } catch (err) {
-            request.log.warn({
-                err,
-                transactionId: parsed.data.transaction_id,
-            }, "signed transaction parse failed");
-            return reply.status(400).send({
-                error: "transaction_parse_failed",
-                message: err instanceof Error ? err.message : "Unable to parse signed transaction",
-            });
-        }
-
         const transaction = await findTransactionById(parsed.data.transaction_id);
         if (!transaction) {
             return reply.status(404).send({
@@ -274,9 +260,27 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let preparedPayment: ParsedSignedPayment;
+        let signedTransaction: ParsedSignedPayment | ParsedHostFunctionTransaction;
         try {
-            preparedPayment = parsePreparedPayment(transaction.preparedXdr);
+            signedTransaction = transaction.kind === "soroswap_swap"
+                ? parseSignedHostFunctionTransaction(parsed.data.signed_transaction)
+                : parseSignedPayment(parsed.data.signed_transaction);
+        } catch (err) {
+            request.log.warn({
+                err,
+                transactionId: parsed.data.transaction_id,
+            }, "signed transaction parse failed");
+            return reply.status(400).send({
+                error: "transaction_parse_failed",
+                message: err instanceof Error ? err.message : "Unable to parse signed transaction",
+            });
+        }
+
+        let preparedHash: string;
+        try {
+            preparedHash = transaction.kind === "soroswap_swap"
+                ? parsePreparedHostFunctionTransaction(transaction.preparedXdr).hash
+                : parsePreparedPayment(transaction.preparedXdr).hash;
         } catch (err) {
             request.log.warn({
                 err,
@@ -288,19 +292,38 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        if (!matchesStoredPayment(transaction, signedPayment) || signedPayment.hash !== preparedPayment.hash) {
+        if (transaction.kind === "payment") {
+            const signedPayment = signedTransaction as ParsedSignedPayment;
+            if (!matchesStoredPayment(transaction, signedPayment) || signedPayment.hash !== preparedHash) {
+                return reply.status(409).send({
+                    error: "transaction_mismatch",
+                    message: "Signed transaction does not match the prepared transaction.",
+                    transaction: serializeTransaction(transaction),
+                });
+            }
+        } else if (transaction.kind === "soroswap_swap") {
+            const signedSwap = signedTransaction as ParsedHostFunctionTransaction;
+            if (signedSwap.hash !== preparedHash) {
+                return reply.status(409).send({
+                    error: "transaction_mismatch",
+                    message: "Signed transaction does not match the prepared transaction.",
+                    transaction: serializeTransaction(transaction),
+                });
+            }
+        } else {
             return reply.status(409).send({
-                error: "transaction_mismatch",
-                message: "Signed transaction does not match the prepared transaction.",
+                error: "transaction_not_submittable",
+                message: "Unsupported transaction kind.",
                 transaction: serializeTransaction(transaction),
             });
         }
 
-        const conflictingTransaction = await findTransactionByHash(signedPayment.hash);
+        const signedHash = "hash" in signedTransaction ? signedTransaction.hash : "";
+        const conflictingTransaction = await findTransactionByHash(signedHash);
         if (conflictingTransaction && conflictingTransaction.id !== transaction.id) {
             request.log.warn({
                 transactionId: parsed.data.transaction_id,
-                txHash: signedPayment.hash,
+                txHash: signedHash,
             }, "transaction hash conflict");
             return reply.status(409).send({
                 error: "idempotency_conflict",
@@ -313,7 +336,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         if (!claimedTransaction) {
             request.log.warn({
                 transactionId: parsed.data.transaction_id,
-                txHash: signedPayment.hash,
+                txHash: signedHash,
             }, "transaction already in progress");
             return reply.status(409).send({
                 error: "transaction_in_progress",
@@ -322,26 +345,26 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
         }
 
         try {
+            const result = transaction.kind === "soroswap_swap"
+                ? await submitSignedTransaction((signedTransaction as ParsedHostFunctionTransaction).transaction)
+                : await submitSignedPayment((signedTransaction as ParsedSignedPayment).transaction);
+
             request.log.info({
                 transactionId: parsed.data.transaction_id,
-                txHash: signedPayment.hash,
-                sourceAccount: signedPayment.sourceAccount,
-                destination: signedPayment.destination,
-                amount: signedPayment.amount,
-                asset: signedPayment.asset,
-            }, "submitting signed payment");
-            const paymentResult = await submitSignedPayment(signedPayment.transaction);
+                txHash: result.hash,
+                sourceAccount: signedTransaction.sourceAccount,
+            }, transaction.kind === "soroswap_swap" ? "submitting signed swap" : "submitting signed payment");
 
             const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
-                txHash: paymentResult.hash,
-                envelopeXdr: paymentResult.envelopeXdr,
-                resultXdr: paymentResult.resultXdr,
+                txHash: result.hash,
+                envelopeXdr: result.envelopeXdr,
+                resultXdr: result.resultXdr,
             });
 
             if (!responseTransaction) {
                 request.log.warn({
                     transactionId: parsed.data.transaction_id,
-                    txHash: signedPayment.hash,
+                    txHash: signedHash,
                 }, "submission state conflict");
                 return reply.status(409).send({
                     error: "submission_state_conflict",
@@ -351,7 +374,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
 
             request.log.info({
                 transactionId: parsed.data.transaction_id,
-                txHash: paymentResult.hash,
+                txHash: result.hash,
             }, "transaction submitted");
             return reply.status(201).send({
                 idempotent_replay: false,
@@ -361,7 +384,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             request.log.error({
                 err,
                 transactionId: parsed.data.transaction_id,
-                txHash: signedPayment.hash,
+                txHash: signedHash,
             }, "transaction submission failed");
             const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseStellarError(err));
             return reply.status(400).send({
@@ -372,21 +395,33 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
     });
 }
 
-function serializeTransaction(transaction: Transaction) {
+export function serializeTransaction(transaction: Transaction) {
+    const paymentIntent = readPaymentIntent(transaction);
     return {
         id: transaction.id,
         idempotency_key: transaction.idempotencyKey,
+        kind: transaction.kind,
         status: transaction.status,
         source_account: transaction.sourceAccount,
         destination_account: transaction.destinationAccount,
         amount: transaction.amount,
         asset: serializeAsset(transaction),
         memo: transaction.memo,
+        intent: transaction.intent,
         prepared_transaction: transaction.status === "created" ? transaction.preparedXdr : null,
         network_passphrase: transaction.status === "created" ? config.stellarNetworkPassphrase : null,
         tx_hash: transaction.txHash,
         error_code: transaction.errorCode,
         error_message: transaction.errorMessage,
+        payment: paymentIntent
+            ? {
+                source_account: paymentIntent.sourceAccount,
+                destination: paymentIntent.destinationAccount,
+                amount: paymentIntent.amount,
+                asset: paymentIntent.asset,
+                memo: paymentIntent.memo,
+            }
+            : null,
         created_at: transaction.createdAt.toISOString(),
         updated_at: transaction.updatedAt.toISOString(),
     };
@@ -402,19 +437,29 @@ function samePreparedPayment(
         memo?: string | undefined;
     },
 ): boolean {
-    return transaction.sourceAccount === input.sourceAccount
-        && transaction.destinationAccount === input.destinationAccount
-        && sameStellarAmount(transaction.amount, input.amount)
-        && (transaction.memo ?? undefined) === (input.memo ?? undefined)
-        && sameAsset(transactionAsset(transaction), input.asset);
+    const payment = readPaymentIntent(transaction);
+    if (!payment) {
+        return false;
+    }
+
+    return payment.sourceAccount === input.sourceAccount
+        && payment.destinationAccount === input.destinationAccount
+        && sameStellarAmount(payment.amount, input.amount)
+        && (payment.memo ?? undefined) === (input.memo ?? undefined)
+        && sameAsset(payment.asset, input.asset);
 }
 
 function matchesStoredPayment(transaction: Transaction, signedPayment: ParsedSignedPayment): boolean {
-    return transaction.sourceAccount === signedPayment.sourceAccount
-        && transaction.destinationAccount === signedPayment.destination
-        && sameStellarAmount(transaction.amount, signedPayment.amount)
-        && (transaction.memo ?? undefined) === (signedPayment.memo ?? undefined)
-        && sameAsset(transactionAsset(transaction), signedPayment.asset);
+    const payment = readPaymentIntent(transaction);
+    if (!payment) {
+        return false;
+    }
+
+    return payment.sourceAccount === signedPayment.sourceAccount
+        && payment.destinationAccount === signedPayment.destination
+        && sameStellarAmount(payment.amount, signedPayment.amount)
+        && (payment.memo ?? undefined) === (signedPayment.memo ?? undefined)
+        && sameAsset(payment.asset, signedPayment.asset);
 }
 
 function sameStellarAmount(left: string, right: string): boolean {
@@ -428,24 +473,12 @@ function normalizeStellarAmount(amount: string): string {
 }
 
 function serializeAsset(transaction: Transaction) {
-    if (transaction.assetType === "native") {
-        return { type: "native" };
+    if (transaction.assetType == null) {
+        return null;
     }
 
-    return {
-        type: transaction.assetType,
-        code: transaction.assetCode,
-        issuer: transaction.assetIssuer,
-    };
-}
-
-function transactionAsset(transaction: Transaction): PaymentAsset {
     if (transaction.assetType === "native") {
         return { type: "native" };
-    }
-
-    if (!transaction.assetCode || !transaction.assetIssuer) {
-        throw new Error("issued asset transaction is missing code or issuer");
     }
 
     return {
@@ -469,6 +502,63 @@ function sameAsset(left: PaymentAsset, right: PaymentAsset): boolean {
     }
 
     return left.code === right.code && left.issuer === right.issuer;
+}
+
+function readPaymentIntent(transaction: Transaction): {
+    sourceAccount: string;
+    destinationAccount: string;
+    amount: string;
+    asset: PaymentAsset;
+    memo?: string | undefined;
+} | null {
+    if (transaction.kind !== "payment") {
+        return null;
+    }
+
+    const intent = transaction.intent as Partial<{
+        source_account: string;
+        destination: string;
+        amount: string;
+        asset: PaymentAsset;
+        memo?: string | null;
+    }> | null | undefined;
+
+    const sourceAccount = intent?.source_account ?? transaction.sourceAccount;
+    const destinationAccount = intent?.destination ?? transaction.destinationAccount ?? undefined;
+    const amount = intent?.amount ?? transaction.amount ?? undefined;
+    const asset = intent?.asset ?? readAsset(transaction);
+
+    if (!destinationAccount || !amount || !asset) {
+        return null;
+    }
+
+    return {
+        sourceAccount,
+        destinationAccount,
+        amount,
+        asset,
+        memo: intent?.memo ?? transaction.memo ?? undefined,
+    };
+}
+
+function readAsset(transaction: Transaction): PaymentAsset | null {
+    if (transaction.assetType == null) {
+        return null;
+    }
+
+    if (transaction.assetType === "native") {
+        return { type: "native" };
+    }
+
+    if (!transaction.assetCode || !transaction.assetIssuer) {
+        return null;
+    }
+
+    return {
+        type: transaction.assetType,
+        code: transaction.assetCode,
+        issuer: transaction.assetIssuer,
+    };
 }
 
 async function verifySourceCanSendAsset(sourceAccount: string, asset: PaymentAsset, amount: string): Promise<void> {
