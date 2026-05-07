@@ -3,10 +3,10 @@ import { z } from "zod";
 
 import { createPaymentTransaction } from "../services/transaction-service.js";
 import type { Transaction } from "../db/schema.js";
-import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
-import { parseStellarError } from "../services/stellar-error-parser.js";
-import { getAccount, parsePreparedHostFunctionTransaction, parsePreparedPayment, parseSignedHostFunctionTransaction, parseSignedPayment, preparePayment, submitSignedPayment, submitSignedTransaction, type ParsedHostFunctionTransaction, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
+import { findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, listTransactions } from "../db/transaction-repository.js";
+import { getAccount, parsePreparedPayment, parseSignedPayment, preparePayment, submitSignedPayment, type ParsedSignedPayment, type PaymentAsset } from "../services/stellar.js";
 import { config } from "../config/env.js";
+import { submitStellarTransactionLifecycle } from "../services/stellar-transaction-submit.js";
 
 const nativeAssetSchema = z.object({
     type: z.literal("native"),
@@ -260,57 +260,7 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let signedTransaction: ParsedSignedPayment | ParsedHostFunctionTransaction;
-        try {
-            signedTransaction = transaction.kind === "soroswap_swap"
-                ? parseSignedHostFunctionTransaction(parsed.data.signed_transaction)
-                : parseSignedPayment(parsed.data.signed_transaction);
-        } catch (err) {
-            request.log.warn({
-                err,
-                transactionId: parsed.data.transaction_id,
-            }, "signed transaction parse failed");
-            return reply.status(400).send({
-                error: "transaction_parse_failed",
-                message: err instanceof Error ? err.message : "Unable to parse signed transaction",
-            });
-        }
-
-        let preparedHash: string;
-        try {
-            preparedHash = transaction.kind === "soroswap_swap"
-                ? parsePreparedHostFunctionTransaction(transaction.preparedXdr).hash
-                : parsePreparedPayment(transaction.preparedXdr).hash;
-        } catch (err) {
-            request.log.warn({
-                err,
-                transactionId: parsed.data.transaction_id,
-            }, "prepared transaction parse failed");
-            return reply.status(409).send({
-                error: "prepared_transaction_invalid",
-                message: err instanceof Error ? err.message : "Unable to parse prepared transaction",
-            });
-        }
-
-        if (transaction.kind === "payment") {
-            const signedPayment = signedTransaction as ParsedSignedPayment;
-            if (!matchesStoredPayment(transaction, signedPayment) || signedPayment.hash !== preparedHash) {
-                return reply.status(409).send({
-                    error: "transaction_mismatch",
-                    message: "Signed transaction does not match the prepared transaction.",
-                    transaction: serializeTransaction(transaction),
-                });
-            }
-        } else if (transaction.kind === "soroswap_swap") {
-            const signedSwap = signedTransaction as ParsedHostFunctionTransaction;
-            if (signedSwap.hash !== preparedHash) {
-                return reply.status(409).send({
-                    error: "transaction_mismatch",
-                    message: "Signed transaction does not match the prepared transaction.",
-                    transaction: serializeTransaction(transaction),
-                });
-            }
-        } else {
+        if (transaction.kind !== "payment") {
             return reply.status(409).send({
                 error: "transaction_not_submittable",
                 message: "Unsupported transaction kind.",
@@ -318,80 +268,21 @@ export async function transactionRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        const signedHash = "hash" in signedTransaction ? signedTransaction.hash : "";
-        const conflictingTransaction = await findTransactionByHash(signedHash);
-        if (conflictingTransaction && conflictingTransaction.id !== transaction.id) {
-            request.log.warn({
-                transactionId: parsed.data.transaction_id,
-                txHash: signedHash,
-            }, "transaction hash conflict");
-            return reply.status(409).send({
-                error: "idempotency_conflict",
-                message: "This signed transaction hash is already associated with a different idempotency key.",
-            });
-        }
-
-        const claimedTransaction = await claimTransactionForSubmissionById(transaction.id);
-
-        if (!claimedTransaction) {
-            request.log.warn({
-                transactionId: parsed.data.transaction_id,
-                txHash: signedHash,
-            }, "transaction already in progress");
-            return reply.status(409).send({
-                error: "transaction_in_progress",
-                message: "Transaction is already in progress.",
-            });
-        }
-
-        try {
-            const result = transaction.kind === "soroswap_swap"
-                ? await submitSignedTransaction((signedTransaction as ParsedHostFunctionTransaction).transaction)
-                : await submitSignedPayment((signedTransaction as ParsedSignedPayment).transaction);
-
-            request.log.info({
-                transactionId: parsed.data.transaction_id,
-                txHash: result.hash,
-                sourceAccount: signedTransaction.sourceAccount,
-            }, transaction.kind === "soroswap_swap" ? "submitting signed swap" : "submitting signed payment");
-
-            const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
-                txHash: result.hash,
-                envelopeXdr: result.envelopeXdr,
-                resultXdr: result.resultXdr,
-            });
-
-            if (!responseTransaction) {
-                request.log.warn({
-                    transactionId: parsed.data.transaction_id,
-                    txHash: signedHash,
-                }, "submission state conflict");
-                return reply.status(409).send({
-                    error: "submission_state_conflict",
-                    message: "Transaction was no longer in submitting state.",
-                });
-            }
-
-            request.log.info({
-                transactionId: parsed.data.transaction_id,
-                txHash: result.hash,
-            }, "transaction submitted");
-            return reply.status(201).send({
-                idempotent_replay: false,
-                transaction: serializeTransaction(responseTransaction),
-            });
-        } catch (err) {
-            request.log.error({
-                err,
-                transactionId: parsed.data.transaction_id,
-                txHash: signedHash,
-            }, "transaction submission failed");
-            const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseStellarError(err));
-            return reply.status(400).send({
-                idempotent_replay: false,
-                transaction: serializeTransaction(responseTransaction ?? claimedTransaction),
-            });
-        }
+        await submitStellarTransactionLifecycle({
+            request,
+            reply,
+            transaction,
+            signedTransactionXdr: parsed.data.signed_transaction,
+            parseSignedTransaction: parseSignedPayment,
+            parsePreparedTransaction: parsePreparedPayment,
+            submitTransaction: async (stellarTransaction) => submitSignedPayment(stellarTransaction),
+            matchesPreparedTransaction: (storedTransaction, signedTransaction, preparedTransaction) =>
+                matchesStoredPayment(storedTransaction, signedTransaction as ParsedSignedPayment)
+                && signedTransaction.hash === preparedTransaction.hash,
+            serializeTransaction,
+            successLogLabel: "submitting signed payment",
+            signedTransactionId: parsed.data.transaction_id,
+        });
     });
 }
 

@@ -2,16 +2,16 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { config } from "../config/env.js";
-import { claimTransactionForSubmissionById, findTransactionByHash, findTransactionById, findTransactionByIdempotencyKey, markSubmittingTransactionSubmitted, markTransactionFailed } from "../db/transaction-repository.js";
+import { findTransactionById, findTransactionByIdempotencyKey } from "../db/transaction-repository.js";
 import type { Transaction } from "../db/schema.js";
 import { createStellarTransaction } from "../services/transaction-service.js";
-import { parseStellarError } from "../services/stellar-error-parser.js";
-import { parsePreparedHostFunctionTransaction, parseSignedHostFunctionTransaction, prepareSoroswapSwap, submitSignedTransaction, type ParsedHostFunctionTransaction } from "../services/stellar.js";
+import { parsePreparedHostFunctionTransaction, parseSignedHostFunctionTransaction, prepareSoroswapSwap, submitSignedTransaction } from "../services/stellar.js";
+import { submitStellarTransactionLifecycle } from "../services/stellar-transaction-submit.js";
 import { serializeTransaction } from "./transactions.js";
 
 const contractIdSchema = z.string().trim().regex(/^C[A-Z2-7]{55}$/, "contract must be a Stellar contract ID");
 const stellarAddressSchema = z.string().trim().regex(/^[GC][A-Z2-7]{55}$/, "address must be a Stellar account or contract");
-const swapAmountSchema = z.string().trim().regex(/^\d+$/, "amount must be a whole-number contract unit string");
+const swapAmountSchema = z.string().trim().regex(/^\d+(\.\d{1,7})?$/, "amount must be a decimal string with up to 7 places");
 
 const prepareSwapSchema = z.object({
     idempotency_key: z.string().trim().min(1),
@@ -52,11 +52,13 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
         }
 
         const deadline = parsed.data.deadline ?? defaultSwapDeadline();
+        const amountIn = normalizeSwapAmount(parsed.data.amount_in);
+        const amountOutMin = normalizeSwapAmount(parsed.data.amount_out_min);
         const swapIntent = {
             source_account: parsed.data.source_account,
             path: parsed.data.path,
-            amount_in: parsed.data.amount_in,
-            amount_out_min: parsed.data.amount_out_min,
+            amount_in: amountIn,
+            amount_out_min: amountOutMin,
             to: parsed.data.to,
             deadline,
         };
@@ -82,8 +84,8 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
             request.log.info({
                 sourceAccount: parsed.data.source_account,
                 path: parsed.data.path,
-                amountIn: parsed.data.amount_in,
-                amountOutMin: parsed.data.amount_out_min,
+                amountIn,
+                amountOutMin,
                 to: parsed.data.to,
                 deadline,
             }, "preparing soroswap transaction");
@@ -92,8 +94,8 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
                 sourceAccount: parsed.data.source_account,
                 routerContractId,
                 path: parsed.data.path,
-                amountIn: parsed.data.amount_in,
-                amountOutMin: parsed.data.amount_out_min,
+                amountIn,
+                amountOutMin,
                 to: parsed.data.to,
                 deadline,
             });
@@ -107,8 +109,8 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
                     router_contract_id: routerContractId,
                     source_account: parsed.data.source_account,
                     path: parsed.data.path,
-                    amount_in: parsed.data.amount_in,
-                    amount_out_min: parsed.data.amount_out_min,
+                    amount_in: amountIn,
+                    amount_out_min: amountOutMin,
                     to: parsed.data.to,
                     deadline,
                 },
@@ -185,20 +187,6 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        let signedSwap: ParsedHostFunctionTransaction;
-        try {
-            signedSwap = parseSignedHostFunctionTransaction(parsed.data.signed_transaction);
-        } catch (err) {
-            request.log.warn({
-                err,
-                transactionId: parsed.data.transaction_id,
-            }, "signed swap parse failed");
-            return reply.status(400).send({
-                error: "transaction_parse_failed",
-                message: err instanceof Error ? err.message : "Unable to parse signed transaction",
-            });
-        }
-
         const transaction = await findTransactionById(parsed.data.transaction_id);
         if (!transaction) {
             return reply.status(404).send({
@@ -214,101 +202,19 @@ export async function swapRoutes(app: FastifyInstance): Promise<void> {
             });
         }
 
-        if (!transaction.preparedXdr) {
-            return reply.status(409).send({
-                error: "transaction_not_prepared",
-                message: "Transaction does not have a prepared envelope XDR.",
-                transaction: serializeTransaction(transaction),
-            });
-        }
-
-        let preparedSwap: ParsedHostFunctionTransaction;
-        try {
-            preparedSwap = parsePreparedHostFunctionTransaction(transaction.preparedXdr);
-        } catch (err) {
-            request.log.warn({
-                err,
-                transactionId: parsed.data.transaction_id,
-            }, "prepared swap parse failed");
-            return reply.status(409).send({
-                error: "prepared_transaction_invalid",
-                message: err instanceof Error ? err.message : "Unable to parse prepared transaction",
-            });
-        }
-
-        if (signedSwap.hash !== preparedSwap.hash) {
-            return reply.status(409).send({
-                error: "transaction_mismatch",
-                message: "Signed transaction does not match the prepared transaction.",
-                transaction: serializeTransaction(transaction),
-            });
-        }
-
-        const conflictingTransaction = await findTransactionByHash(signedSwap.hash);
-        if (conflictingTransaction && conflictingTransaction.id !== transaction.id) {
-            request.log.warn({
-                transactionId: parsed.data.transaction_id,
-                txHash: signedSwap.hash,
-            }, "swap hash conflict");
-            return reply.status(409).send({
-                error: "idempotency_conflict",
-                message: "This signed transaction hash is already associated with a different idempotency key.",
-            });
-        }
-
-        const claimedTransaction = await claimTransactionForSubmissionById(transaction.id);
-        if (!claimedTransaction) {
-            request.log.warn({
-                transactionId: parsed.data.transaction_id,
-                txHash: signedSwap.hash,
-            }, "swap already in progress");
-            return reply.status(409).send({
-                error: "transaction_in_progress",
-                message: "Transaction is already in progress.",
-            });
-        }
-
-        try {
-            request.log.info({
-                transactionId: parsed.data.transaction_id,
-                txHash: signedSwap.hash,
-                sourceAccount: signedSwap.sourceAccount,
-            }, "submitting signed swap");
-            const swapResult = await submitSignedTransaction(signedSwap.transaction);
-
-            const responseTransaction = await markSubmittingTransactionSubmitted(claimedTransaction.id, {
-                txHash: swapResult.hash,
-                envelopeXdr: swapResult.envelopeXdr,
-                resultXdr: swapResult.resultXdr,
-            });
-
-            if (!responseTransaction) {
-                request.log.warn({
-                    transactionId: parsed.data.transaction_id,
-                    txHash: signedSwap.hash,
-                }, "swap submission state conflict");
-                return reply.status(409).send({
-                    error: "submission_state_conflict",
-                    message: "Transaction was no longer in submitting state.",
-                });
-            }
-
-            return reply.status(201).send({
-                idempotent_replay: false,
-                transaction: serializeTransaction(responseTransaction),
-            });
-        } catch (err) {
-            request.log.error({
-                err,
-                transactionId: parsed.data.transaction_id,
-                txHash: signedSwap.hash,
-            }, "swap submission failed");
-            const responseTransaction = await markTransactionFailed(claimedTransaction.id, parseStellarError(err));
-            return reply.status(400).send({
-                idempotent_replay: false,
-                transaction: serializeTransaction(responseTransaction ?? claimedTransaction),
-            });
-        }
+        await submitStellarTransactionLifecycle({
+            request,
+            reply,
+            transaction,
+            signedTransactionXdr: parsed.data.signed_transaction,
+            parseSignedTransaction: parseSignedHostFunctionTransaction,
+            parsePreparedTransaction: parsePreparedHostFunctionTransaction,
+            submitTransaction: async (stellarTransaction) => submitSignedTransaction(stellarTransaction),
+            matchesPreparedTransaction: (_, signedTransaction, preparedTransaction) => signedTransaction.hash === preparedTransaction.hash,
+            serializeTransaction,
+            successLogLabel: "submitting signed swap",
+            signedTransactionId: parsed.data.transaction_id,
+        });
     });
 }
 
@@ -356,9 +262,17 @@ function sameContractAmount(left: string | undefined, right: string): boolean {
         return false;
     }
 
-    return BigInt(left.trim()) === BigInt(right.trim());
+    return normalizeSwapAmount(left) === normalizeSwapAmount(right);
 }
 
 function defaultSwapDeadline(): number {
     return Math.floor(Date.now() / 1000) + 600;
+}
+
+function normalizeSwapAmount(amount: string): string {
+    const trimmed = amount.trim();
+    const [whole = "0", fraction = ""] = trimmed.split(".");
+    const normalizedWhole = whole.replace(/^0+(?=\d)/, "");
+    const scaled = `${normalizedWhole || "0"}${fraction.padEnd(7, "0").slice(0, 7)}`;
+    return scaled.replace(/^0+(?=\d)/, "") || "0";
 }

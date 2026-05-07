@@ -58,14 +58,16 @@ describe("POST /swap/prepare", () => {
 
   it("prepares a swap transaction and stores the intent", async () => {
     const deadline = 1_777_509_000;
+    const amountIn = swapUnits("100");
+    const amountOutMin = swapUnits("95");
     const createdTransaction = makeTransaction({
       preparedXdr: "prepared-swap-xdr",
       intent: {
         router_contract_id: "C".padEnd(56, "A"),
         source_account: stellarKey("A"),
         path: [contractKey("A"), contractKey("B")],
-        amount_in: "100",
-        amount_out_min: "95",
+        amount_in: amountIn,
+        amount_out_min: amountOutMin,
         to: stellarKey("B"),
         deadline,
       },
@@ -89,8 +91,8 @@ describe("POST /swap/prepare", () => {
       sourceAccount: stellarKey("A"),
       routerContractId: "C".padEnd(56, "A"),
       path: [contractKey("A"), contractKey("B")],
-      amountIn: "100",
-      amountOutMin: "95",
+      amountIn,
+      amountOutMin,
       to: stellarKey("B"),
       deadline,
     });
@@ -103,8 +105,8 @@ describe("POST /swap/prepare", () => {
         router_contract_id: "C".padEnd(56, "A"),
         source_account: stellarKey("A"),
         path: [contractKey("A"), contractKey("B")],
-        amount_in: "100",
-        amount_out_min: "95",
+        amount_in: amountIn,
+        amount_out_min: amountOutMin,
         to: stellarKey("B"),
         deadline,
       },
@@ -124,14 +126,16 @@ describe("POST /swap/prepare", () => {
   });
 
   it("returns an idempotent prepared transaction replay", async () => {
+    const amountIn = swapUnits("100");
+    const amountOutMin = swapUnits("95");
     const existingTransaction = makeTransaction({
       preparedXdr: "existing-prepared-swap-xdr",
       intent: {
         router_contract_id: "C".padEnd(56, "A"),
         source_account: stellarKey("A"),
         path: [contractKey("A"), contractKey("B")],
-        amount_in: "100",
-        amount_out_min: "95",
+        amount_in: amountIn,
+        amount_out_min: amountOutMin,
         to: stellarKey("B"),
         deadline: 1_777_509_000,
       },
@@ -171,6 +175,8 @@ describe("POST /swap/submit", () => {
 
   it("submits a signed swap transaction", async () => {
     const deadline = 1_777_509_000;
+    const amountIn = swapUnits("100");
+    const amountOutMin = swapUnits("95");
     const createdTransaction = makeTransaction({
       status: "created",
       preparedXdr: "prepared-swap-xdr",
@@ -178,8 +184,8 @@ describe("POST /swap/submit", () => {
         router_contract_id: "C".padEnd(56, "A"),
         source_account: stellarKey("A"),
         path: [contractKey("A"), contractKey("B")],
-        amount_in: "100",
-        amount_out_min: "95",
+        amount_in: amountIn,
+        amount_out_min: amountOutMin,
         to: stellarKey("B"),
         deadline,
       },
@@ -250,8 +256,8 @@ describe("POST /swap/submit", () => {
         router_contract_id: "C".padEnd(56, "A"),
         source_account: stellarKey("A"),
         path: [contractKey("A"), contractKey("B")],
-        amount_in: "100",
-        amount_out_min: "95",
+        amount_in: swapUnits("100"),
+        amount_out_min: swapUnits("95"),
         to: stellarKey("B"),
         deadline: 1_777_509_000,
       },
@@ -337,8 +343,8 @@ function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
       router_contract_id: "C".padEnd(56, "A"),
       source_account: stellarKey("A"),
       path: [contractKey("A"), contractKey("B")],
-      amount_in: "100",
-      amount_out_min: "95",
+      amount_in: swapUnits("100"),
+      amount_out_min: swapUnits("95"),
       to: stellarKey("B"),
       deadline: 1_777_509_000,
     },
@@ -356,4 +362,11 @@ function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
     updatedAt: now,
     ...overrides,
   };
+}
+
+function swapUnits(value: string): string {
+  const [whole = "0", fraction = ""] = value.trim().split(".");
+  const normalizedWhole = whole.replace(/^0+(?=\d)/, "") || "0";
+  const scaled = `${normalizedWhole}${fraction.padEnd(7, "0").slice(0, 7)}`;
+  return scaled.replace(/^0+(?=\d)/, "") || "0";
 }

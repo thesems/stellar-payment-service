@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Asset } from "@stellar/stellar-sdk";
 import {
   getAddress,
   getNetwork,
@@ -8,7 +9,7 @@ import {
 } from "@stellar/freighter-api";
 
 import { TransactionTable } from "./components/TransactionTable.jsx";
-import { Card, Field, OutputPane, TabButton, TextareaField } from "./components/ui.jsx";
+import { Card, Field, OutputPane, TabButton } from "./components/ui.jsx";
 import { formatError, prettyPrint, requestJson } from "../js/http.js";
 import { describeAsset, shortenAddress } from "./utils/formatters.js";
 import brandMarkUrl from "../favicon.svg";
@@ -24,12 +25,31 @@ const DEFAULT_CREATE_TRANSACTION = {
 
 function createDefaultSwapForm() {
   return {
-    path: "",
+    source_asset_key: "",
+    destination_asset_key: "",
     amount_in: "",
     amount_out_min: "",
     to: "",
     idempotency_key: `swap-demo-${Math.floor(Date.now() / 1000)}`,
   };
+}
+
+function createDefaultSwapFormForAssets(sendableAssets) {
+  const sourceAssets = Array.isArray(sendableAssets) ? sendableAssets : [];
+  const sourceAssetKey = sourceAssets[0]?.key ?? "";
+  const destinationAssetKey = getDefaultSwapDestinationKey(sourceAssets, sourceAssetKey);
+
+  return {
+    ...createDefaultSwapForm(),
+    source_asset_key: sourceAssetKey,
+    destination_asset_key: destinationAssetKey,
+  };
+}
+
+function getDefaultSwapDestinationKey(sendableAssets, sourceAssetKey) {
+  const destinationAssets = getSwapDestinationAssets(sendableAssets);
+  const destinationAsset = destinationAssets.find((asset) => asset.key !== sourceAssetKey);
+  return destinationAsset?.key ?? "";
 }
 
 const DEFAULT_TRANSACTION_LIST = {
@@ -447,21 +467,39 @@ function App() {
         throw new Error("Unable to load the connected account.");
       }
 
-      const path = parseContractPath(createSwapForm.path);
+      const sourceAsset = getSwapAssetOptionByKey(sendableSwapAssets, createSwapForm.source_asset_key);
+      const destinationAsset = getSwapAssetOptionByKey(
+        getSwapDestinationAssets(sendableSwapAssets),
+        createSwapForm.destination_asset_key,
+      );
       const amountIn = createSwapForm.amount_in.trim();
       const amountOutMin = createSwapForm.amount_out_min.trim();
       const to = createSwapForm.to.trim();
       const idempotencyKey = createSwapForm.idempotency_key.trim();
+      const networkPassphrase = network?.networkPassphrase
+        ?? accountState.network?.networkPassphrase
+        ?? "Test SDF Network ; September 2015";
 
-      if (path.length < 2) {
-        throw new Error("Swap path must include at least two contract IDs.");
+      if (!sourceAsset) {
+        throw new Error("Choose a source asset from the wallet balances.");
+      }
+      if (!destinationAsset) {
+        throw new Error("Choose a destination asset from the supported asset list.");
+      }
+      if (sourceAsset.key === destinationAsset.key) {
+        throw new Error("Source and destination assets must be different.");
       }
       if (!amountIn || !amountOutMin || !to) {
-        throw new Error("Path, amounts, and recipient are required before using Freighter.");
+        throw new Error("Assets, amounts, and recipient are required before using Freighter.");
       }
       if (!idempotencyKey) {
         throw new Error("Idempotency key is required before submitting.");
       }
+
+      const path = [
+        getSwapAssetContractId(sourceAsset.asset, networkPassphrase),
+        getSwapAssetContractId(destinationAsset.asset, networkPassphrase),
+      ];
 
       const preparePayload = {
         idempotency_key: idempotencyKey,
@@ -479,7 +517,7 @@ function App() {
 
       setCreateSwapOutput(prettyPrint(prepared));
       setCreateSwapModalOpen(false);
-      setCreateSwapForm(createDefaultSwapForm());
+      setCreateSwapForm(createDefaultSwapFormForAssets(sendableSwapAssets));
       await loadTransactionList({ offset: 0 });
       await loadCurrentAccount(address, network);
       setFreighter({
@@ -553,7 +591,8 @@ function App() {
         throw new Error("Freighter did not return a signed transaction.");
       }
 
-      const submission = await requestJson("/tx/submit", {
+      const submitPath = transaction.kind === "soroswap_swap" ? "/swap/submit" : "/tx/submit";
+      const submission = await requestJson(submitPath, {
         method: "POST",
         body: JSON.stringify({
           transaction_id: transaction.id,
@@ -593,10 +632,30 @@ function App() {
 
   const freighterReady = freighter.className === "status-ok";
   const sendableAssets = deriveSendableAssets(currentAccount.data?.balances ?? []);
+  const sendableSwapAssets = getSwapDestinationAssets(sendableAssets);
   const selectedAssetAvailable = sendableAssets.some((asset) => asset.key === createTransactionForm.asset_key);
   const selectedAssetLabel = selectedAssetAvailable
     ? sendableAssets.find((asset) => asset.key === createTransactionForm.asset_key)?.label
     : createTransactionForm.asset_key;
+  const selectedSwapSourceAsset = getSwapAssetOptionByKey(sendableAssets, createSwapForm.source_asset_key);
+  const selectedSwapDestinationAsset = getSwapAssetOptionByKey(sendableSwapAssets, createSwapForm.destination_asset_key);
+  const selectedSwapDestinationOptions = sendableSwapAssets.filter((asset) => asset.key !== createSwapForm.source_asset_key);
+  const swapAmountInLabel = selectedSwapSourceAsset
+    ? `Amount in ${describeAsset(selectedSwapSourceAsset.asset)}`
+    : "Amount in source asset";
+  const swapAmountOutLabel = selectedSwapDestinationAsset
+    ? `Minimum amount out ${describeAsset(selectedSwapDestinationAsset.asset)}`
+    : "Minimum amount out destination asset";
+  const swapRoutePreview = selectedSwapSourceAsset && selectedSwapDestinationAsset
+    ? `${describeAsset(selectedSwapSourceAsset.asset)} → ${describeAsset(selectedSwapDestinationAsset.asset)}`
+    : "";
+  const swapSubmitDisabled = !selectedSwapSourceAsset
+    || !selectedSwapDestinationAsset
+    || selectedSwapSourceAsset.key === selectedSwapDestinationAsset.key
+    || !createSwapForm.amount_in.trim()
+    || !createSwapForm.amount_out_min.trim()
+    || !createSwapForm.to.trim()
+    || !createSwapForm.idempotency_key.trim();
 
   return (
     <main className="shell">
@@ -679,7 +738,7 @@ function App() {
                     className="button button-secondary"
                     type="button"
                     onClick={() => {
-                      setCreateSwapForm(createDefaultSwapForm());
+                      setCreateSwapForm(createDefaultSwapFormForAssets(sendableAssets));
                       setCreateTransactionModalOpen(false);
                       setCreateSwapModalOpen(true);
                     }}
@@ -849,27 +908,86 @@ function App() {
               </button>
             </div>
             <form className="form" onSubmit={(event) => void createPreparedSwap(event)}>
-              <TextareaField
-                label="Path contract IDs"
-                name="path"
-                placeholder={"CA...\nCA...\nCA..."}
-                rows={5}
-                value={createSwapForm.path}
-                onChange={(value) => setCreateSwapForm((current) => ({ ...current, path: value }))}
-              />
+              <label>
+                From asset
+                <select
+                  name="source_asset"
+                  value={createSwapForm.source_asset_key}
+                  onChange={(event) => {
+                    const nextSourceAssetKey = event.target.value;
+                    setCreateSwapForm((current) => {
+                      const nextDestinationAssetKey = current.destination_asset_key === nextSourceAssetKey
+                        ? getDefaultSwapDestinationKey(sendableAssets, nextSourceAssetKey)
+                        : current.destination_asset_key;
+
+                      return {
+                        ...current,
+                        source_asset_key: nextSourceAssetKey,
+                        destination_asset_key: nextDestinationAssetKey,
+                      };
+                    });
+                  }}
+                  disabled={sendableAssets.length === 0}
+                  required
+                >
+                  {sendableAssets.length === 0 ? (
+                    <option value="">
+                      No wallet assets available
+                    </option>
+                  ) : null}
+                  {createSwapForm.source_asset_key && !selectedSwapSourceAsset ? (
+                    <option value={createSwapForm.source_asset_key}>
+                      {createSwapForm.source_asset_key}
+                    </option>
+                  ) : null}
+                  {!createSwapForm.source_asset_key ? <option value="">Select a source asset</option> : null}
+                  {sendableAssets.map((entry) => (
+                    <option key={entry.key} value={entry.key}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                To asset
+                <select
+                  name="destination_asset"
+                  value={createSwapForm.destination_asset_key}
+                  onChange={(event) => setCreateSwapForm((current) => ({ ...current, destination_asset_key: event.target.value }))}
+                  disabled={selectedSwapDestinationOptions.length === 0}
+                  required
+                >
+                  {selectedSwapDestinationOptions.length === 0 ? (
+                    <option value="">
+                      No supported destination assets
+                    </option>
+                  ) : null}
+                  {createSwapForm.destination_asset_key && !selectedSwapDestinationAsset ? (
+                    <option value={createSwapForm.destination_asset_key}>
+                      {createSwapForm.destination_asset_key}
+                    </option>
+                  ) : null}
+                  {!createSwapForm.destination_asset_key ? <option value="">Select a destination asset</option> : null}
+                  {selectedSwapDestinationOptions.map((entry) => (
+                    <option key={entry.key} value={entry.key}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <Field
-                label="Amount in"
+                label={swapAmountInLabel}
                 name="amount_in"
-                placeholder="10000000"
-                inputMode="numeric"
+                placeholder="300"
+                inputMode="decimal"
                 value={createSwapForm.amount_in}
                 onChange={(value) => setCreateSwapForm((current) => ({ ...current, amount_in: value }))}
               />
               <Field
-                label="Minimum amount out"
+                label={swapAmountOutLabel}
                 name="amount_out_min"
-                placeholder="9900000"
-                inputMode="numeric"
+                placeholder="10"
+                inputMode="decimal"
                 value={createSwapForm.amount_out_min}
                 onChange={(value) => setCreateSwapForm((current) => ({ ...current, amount_out_min: value }))}
               />
@@ -887,15 +1005,20 @@ function App() {
                 value={createSwapForm.idempotency_key}
                 onChange={(value) => setCreateSwapForm((current) => ({ ...current, idempotency_key: value }))}
               />
+              {swapRoutePreview ? (
+                <div className="hint">
+                  Route preview: {swapRoutePreview}. The contract path is derived automatically from the selected assets.
+                </div>
+              ) : null}
               <div className="hint">
-                The connected Freighter account is used as the swap source. The path must contain at least two contract IDs.
+                Enter human amounts like 300 and 10. The backend converts them to contract units.
                 The backend sets the swap deadline automatically.
               </div>
               <div className="button-row tx-button-row">
                 <button className="button button-secondary" type="button" onClick={() => setCreateSwapModalOpen(false)}>
                   Cancel
                 </button>
-                <button className="button" type="submit">
+                <button className="button" type="submit" disabled={swapSubmitDisabled}>
                   Create Swap
                 </button>
               </div>
@@ -1031,11 +1154,38 @@ function assetKey(asset) {
   return `${asset.type}:${asset.code}:${asset.issuer}`;
 }
 
-function parseContractPath(value) {
-  return String(value ?? "")
-    .split(/[\s,]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+function getSwapDestinationAssets(sendableAssets) {
+  const assets = Array.isArray(sendableAssets) ? [...sendableAssets] : [];
+  if (!assets.some((asset) => asset.key === "native")) {
+    assets.unshift({
+      asset: { type: "native" },
+      key: "native",
+      label: "Native XLM",
+      balance: null,
+    });
+  }
+
+  return assets;
+}
+
+function getSwapAssetOptionByKey(options, key) {
+  if (!key || !Array.isArray(options)) {
+    return null;
+  }
+
+  return options.find((option) => option.key === key) ?? null;
+}
+
+function getSwapAssetContractId(asset, networkPassphrase) {
+  if (!asset || !networkPassphrase) {
+    throw new Error("Unable to derive a contract ID for the selected asset.");
+  }
+
+  const stellarAsset = asset.type === "native"
+    ? Asset.native()
+    : new Asset(asset.code, asset.issuer);
+
+  return stellarAsset.contractId(networkPassphrase);
 }
 
 function readWorkspaceTabFromUrl() {
